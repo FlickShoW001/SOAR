@@ -1,0 +1,89 @@
+# SOAR Platform Configuration
+# Thresholds and rules are centralized here, not hardcoded in source
+
+# Enrichment Configuration
+enrichment:
+  # AbuseIPDB thresholds - classify IP reputation
+  abuse_score_thresholds:
+    critical: 75      # Score >= 75: High malicious activity
+    high: 50          # Score >= 50: Moderate malicious activity
+    medium: 25        # Score >= 25: Some reports
+    low: 0            # Score 0: No reports (but still enrich)
+  
+  # Report count thresholds - more reports = higher confidence
+  report_count_thresholds:
+    critical: 100
+    high: 50
+    medium: 20
+    low: 0
+
+# Decision Engine Configuration
+decision_engine:
+  # Risk scoring weights - sum to influence final risk_score (0-100)
+  # These weights determine which factors contribute most to the decision
+  risk_score_weights:
+    abuse_score: 0.40      # 40% from AbuseIPDB reputation
+    event_severity: 0.35   # 35% from raw event severity
+    report_count: 0.25     # 25% from report frequency
+  
+  # Confidence thresholds - how certain we are in our decision
+  confidence_thresholds:
+    high: 0.80             # >= 80% confidence
+    medium: 0.60           # >= 60% confidence
+    low: 0.40              # >= 40% confidence
+  
+  # Action thresholds - risk_score determines recommended action
+  # (before approval gate is applied)
+  action_thresholds:
+    block_min_risk: 75     # Risk score >= 75: Recommend BLOCK
+    monitor_min_risk: 50   # Risk score >= 50: Recommend MONITOR
+    ignore_min_risk: 0     # Risk score >= 0: Recommend IGNORE
+  
+  # Approval gate rules - which decisions require human approval
+  approval_rules:
+    # Any BLOCK action requires approval (high impact)
+    block_requires_approval: true
+    
+    # MONITOR actions auto-approve if risk < threshold
+    monitor_auto_approve_max_risk: 45
+    
+    # IGNORE actions always auto-approve (low impact)
+    ignore_requires_approval: false
+    
+    # High-severity events always require approval
+    high_severity_requires_approval: true
+    
+    # Events from unknown/uncached IPs require approval
+    uncached_ip_requires_approval: true
+
+# Event Severity Mapping
+# Standardizes event severity across different log sources
+event_severity:
+  critical: 5
+  high: 4
+  medium: 3
+  low: 2
+  info: 1
+
+# Log file source configuration
+# Supports tailing local log files as an alternative to POST endpoint
+log_sources:
+  enabled: true
+  paths:
+    - /var/log/auth.log
+    - /var/log/secure
+  poll_interval_seconds: 5
+
+# Dry-run / Simulation mode
+# When enabled, responder will NOT actually connect to device
+responder:
+  dry_run: true              # CRITICAL: Set to false ONLY after lab testing
+  simulation_mode: true      # Log what would be sent without connecting
+  
+# Audit trail configuration
+audit_log:
+  # Enable tamper-evidence via hash-chaining
+  enable_hash_chain: true
+  
+  # How many previous audit entries to keep (for verification performance)
+  verification_depth: 1000
