@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 _enrichment_cache: Dict[str, tuple[Dict[str, Any], datetime]] = {}
 
 
-def enrich_ip(ip: str, session, cache_ttl_minutes: int = 60) -> Optional[EnrichmentResult]:
+def enrich_ip(ip: str, session, event_id: int = None, cache_ttl_minutes: int = 60) -> Optional[EnrichmentResult]:
     """
     Enrich an IP address with reputation data from AbuseIPDB.
     
@@ -40,7 +40,7 @@ def enrich_ip(ip: str, session, cache_ttl_minutes: int = 60) -> Optional[Enrichm
     
     if not api_key:
         logger.warning("ABUSEIPDB_API_KEY not set; skipping enrichment")
-        return _create_failed_enrichment(ip, session, "API key not configured")
+        return _create_failed_enrichment(ip, session, event_id, "API key not configured")
     
     # Check in-memory cache first
     if ip in _enrichment_cache:
@@ -48,7 +48,9 @@ def enrich_ip(ip: str, session, cache_ttl_minutes: int = 60) -> Optional[Enrichm
         if (datetime.utcnow() - cached_time).total_seconds() < cache_ttl_minutes * 60:
             logger.info(f"Using cached enrichment for {ip}")
             # Return cached result from database if it exists, or create new entry
-            return _get_or_create_enrichment_from_cache(ip, cached_result, session, cache_ttl_minutes)
+            return _get_or_create_enrichment_from_cache(
+    ip, cached_result, session, event_id, cache_ttl_minutes
+)
     
     # Call AbuseIPDB API
     try:
@@ -68,15 +70,16 @@ def enrich_ip(ip: str, session, cache_ttl_minutes: int = 60) -> Optional[Enrichm
         
         if response.status_code == 401:
             logger.error("Invalid AbuseIPDB API key")
-            return _create_failed_enrichment(ip, session, "Invalid API key (401)")
+            return _create_failed_enrichment(ip, session, event_id, "Invalid API key (401)")
         
         if response.status_code == 429:
             logger.warning(f"AbuseIPDB rate limit hit; returning cached or empty result for {ip}")
-            return _create_failed_enrichment(ip, session, "Rate limited (429)")
+            return _create_failed_enrichment(ip, session, event_id, "Rate limited (429)")
         
         if response.status_code == 200:
             data = response.json().get("data", {})
             enrichment = EnrichmentResult(
+		event_id=event_id,
                 source_ip=ip,
                 abuse_score=data.get("abuseConfidenceScore", 0.0),
                 country=data.get("countryCode", "Unknown"),
@@ -96,27 +99,28 @@ def enrich_ip(ip: str, session, cache_ttl_minutes: int = 60) -> Optional[Enrichm
             return enrichment
         else:
             logger.error(f"AbuseIPDB returned status {response.status_code}")
-            return _create_failed_enrichment(ip, session, f"HTTP {response.status_code}")
+            return _create_failed_enrichment(ip, session, event_id, f"HTTP {response.status_code}")
     
     except requests.Timeout:
         logger.error(f"AbuseIPDB request timed out for {ip}")
-        return _create_failed_enrichment(ip, session, "Request timeout")
+        return _create_failed_enrichment(ip, session, event_id, "Request timeout")
     
     except requests.RequestException as e:
         logger.error(f"AbuseIPDB request failed for {ip}: {e}")
-        return _create_failed_enrichment(ip, session, f"Request error: {str(e)}")
+        return _create_failed_enrichment(ip, session, event_id, f"Request error: {str(e)}")
     
     except json.JSONDecodeError:
         logger.error(f"Failed to parse AbuseIPDB response for {ip}")
-        return _create_failed_enrichment(ip, session, "JSON decode error")
+        return _create_failed_enrichment(ip, session, event_id, "JSON decode error")
 
 
-def _create_failed_enrichment(ip: str, session, error_msg: str) -> EnrichmentResult:
+def _create_failed_enrichment(ip: str, session, event_id: int, error_msg: str) -> EnrichmentResult:
     """
     Create a failed enrichment record when API calls don't succeed.
     Still persists to DB for audit purposes.
     """
     enrichment = EnrichmentResult(
+	event_id=event_id,
         source_ip=ip,
         abuse_score=0.0,
         country="Unknown",
@@ -130,12 +134,13 @@ def _create_failed_enrichment(ip: str, session, error_msg: str) -> EnrichmentRes
 
 
 def _get_or_create_enrichment_from_cache(
-    ip: str, cached_data: Dict[str, Any], session, cache_ttl_minutes: int
+    ip: str, cached_data: Dict[str, Any], session, event_id: int, cache_ttl_minutes: int
 ) -> EnrichmentResult:
     """
     Helper: on cache hit, create or update DB record from cached API response.
     """
     enrichment = EnrichmentResult(
+	event_id=event_id,
         source_ip=ip,
         abuse_score=cached_data.get("abuseConfidenceScore", 0.0),
         country=cached_data.get("countryCode", "Unknown"),

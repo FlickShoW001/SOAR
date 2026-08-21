@@ -7,7 +7,7 @@ import os
 import logging
 from datetime import datetime
 from contextlib import contextmanager
-
+from sqlalchemy import create_engine, text
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -129,7 +129,7 @@ def post_detection(req: DetectionRequest, db: Session = Depends(get_db)):
         audit_event_detection(event, db)
         
         # Step 3: Enrich immediately (synchronously for simplicity; could be async)
-        enrichment = enrich_ip(req.source_ip, db)
+        enrichment = enrich_ip(req.source_ip, db,event.id)
         event.status = "enriched"
         db.commit()
         audit_enrichment(event, enrichment, db)
@@ -170,7 +170,7 @@ def post_detection(req: DetectionRequest, db: Session = Depends(get_db)):
             resp_result = execute_response(event, decision)
             event.status = "responded"
             db.commit()
-            audit_response(event, db)
+            audit_response(event, decision, resp_result, db)
             
             return {
                 "id": event.id,
@@ -383,7 +383,7 @@ def get_event(event_id: int, db: Session = Depends(get_db)):
 def health_check(db: Session = Depends(get_db)):
     """GET /health: Health check endpoint."""
     try:
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         audit_valid = verify_audit_chain(db, depth=100)
         return {
             "status": "healthy",
@@ -418,7 +418,7 @@ def shutdown():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        app,
+        "main:app",
         host=os.getenv("API_HOST", "0.0.0.0"),
         port=int(os.getenv("API_PORT", 8000)),
         reload=os.getenv("API_RELOAD", "True").lower() == "true"

@@ -195,29 +195,58 @@ def audit_decision(event, decision, session):
 
 
 def audit_approval(event, approval, session):
-    """Helper: audit approval or rejection."""
+    """Helper: audit approval, auto-approval, or rejection."""
+    if approval.status in ("approved", "auto_approved"):
+        action = "approve"
+        status = "approved"
+        reasoning = (
+            "Decision automatically approved"
+            if approval.status == "auto_approved"
+            else "Decision approved by human operator"
+        )
+    else:
+        action = "reject"
+        status = "rejected"
+        reasoning = approval.rejected_reason or "Decision rejected"
+
     create_audit_entry(
         event_id=event.id,
-        actor=approval.approved_by or "unknown",
-        action="approve" if approval.status == "approved" else "reject",
-        before_state={"status": event.status, "approval_status": "pending"},
+        actor=approval.approved_by or "system",
+        action=action,
+        before_state={
+            "status": event.status,
+            "approval_status": "pending"
+        },
         after_state={
-            "status": "approved" if approval.status == "approved" else "rejected",
+            "status": status,
             "approval_status": approval.status
         },
-        reasoning=approval.rejected_reason or f"Decision {approval.status}",
+        reasoning=reasoning,
         session=session
     )
 
+def audit_response(event, decision, response_result, session):
+    """Helper: audit the actual response result."""
 
-def audit_response(event, session):
-    """Helper: audit response execution."""
+    response_status = response_result.get("status", "unknown")
+
+    if decision.action == "block" and response_status != "skipped":
+        reasoning = "Response action executed (block rule applied)"
+    else:
+        reasoning = (
+            f"Response skipped: decision action was '{decision.action}'"
+        )
+
     create_audit_entry(
         event_id=event.id,
         actor="system",
         action="respond",
         before_state={"status": event.status},
-        after_state={"status": "responded"},
-        reasoning="Response action executed (block rule applied)",
+        after_state={
+            "status": "responded",
+            "response_status": response_status,
+            "decision_action": decision.action
+        },
+        reasoning=reasoning,
         session=session
     )
