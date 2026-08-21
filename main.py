@@ -222,7 +222,7 @@ def approve_decision(event_id: int, req: ApprovalRequest, db: Session = Depends(
             resp_result = execute_response(event, decision)
             event.status = "responded"
             db.commit()
-            audit_response(event, db)
+            audit_response(event, decision, resp_result, db)
             
             return {
                 "id": event.id,
