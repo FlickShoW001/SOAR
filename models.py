@@ -3,15 +3,28 @@ SQLAlchemy database models for SOAR platform.
 Defines the schema for events, enrichment, decisions, approvals, and audit logs.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
+
 from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, Boolean, 
-    Text, ForeignKey, create_engine, JSON
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
 )
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
+
+
+def utc_now():
+    """Return an aware UTC datetime for database defaults."""
+    return datetime.now(timezone.utc)
 
 
 class Event(Base):
@@ -19,17 +32,20 @@ class Event(Base):
     Represents a security event detected by the platform.
     Status flow: new -> enriched -> decided -> approved -> responded -> closed
     """
+
     __tablename__ = "events"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     source_ip = Column(String(45), index=True)  # Support IPv4 and IPv6
     event_type = Column(String(50), index=True)
     severity = Column(Integer)  # 1-5: info, low, medium, high, critical
     raw_log_line = Column(Text)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-    status = Column(String(50), default="new", index=True)  # new, enriched, decided, approved, responded, closed
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    timestamp = Column(DateTime(timezone=True), default=utc_now, index=True)
+    status = Column(
+        String(50), default="new", index=True
+    )  # new, enriched, decided, approved, responded, closed
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class EnrichmentResult(Base):
@@ -37,8 +53,9 @@ class EnrichmentResult(Base):
     Caches enrichment data for each IP address.
     Foreign key to Event for direct association.
     """
+
     __tablename__ = "enrichment_results"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     event_id = Column(Integer, ForeignKey("events.id"), index=True)
     source_ip = Column(String(45), index=True)
@@ -49,8 +66,8 @@ class EnrichmentResult(Base):
     is_vpn = Column(Boolean, default=False)
     is_proxy = Column(Boolean, default=False)
     raw_response = Column(JSON)  # Full API response stored for audit
-    retrieved_at = Column(DateTime, default=datetime.utcnow)
-    cached_at = Column(DateTime, default=datetime.utcnow)
+    retrieved_at = Column(DateTime(timezone=True), default=utc_now)
+    cached_at = Column(DateTime(timezone=True), default=utc_now)
     cache_ttl_minutes = Column(Integer)
     error = Column(String(500), nullable=True)  # If enrichment failed
 
@@ -60,8 +77,9 @@ class Decision(Base):
     Represents the automated decision made by the decision engine.
     Links to Event and EnrichmentResult.
     """
+
     __tablename__ = "decisions"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     event_id = Column(Integer, ForeignKey("events.id"), unique=True, index=True)
     enrichment_id = Column(Integer, ForeignKey("enrichment_results.id"))
@@ -70,7 +88,7 @@ class Decision(Base):
     risk_score = Column(Float)  # 0-100
     requires_approval = Column(Boolean, default=False)
     reasoning = Column(Text)  # JSON string detailing which rules fired
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class Approval(Base):
@@ -78,17 +96,20 @@ class Approval(Base):
     Tracks human approval/rejection of decisions.
     Status: pending -> approved/rejected
     """
+
     __tablename__ = "approvals"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     event_id = Column(Integer, ForeignKey("events.id"), unique=True, index=True)
     decision_id = Column(Integer, ForeignKey("decisions.id"))
     status = Column(String(20), default="pending")  # pending, approved, rejected
     approved_by = Column(String(100))  # Username or email
     rejected_reason = Column(Text, nullable=True)
-    approved_at = Column(DateTime, nullable=True)
-    expires_at = Column(DateTime, nullable=True)  # Optional approval expiration
-    created_at = Column(DateTime, default=datetime.utcnow)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(
+        DateTime(timezone=True), nullable=True
+    )  # Optional approval expiration
+    created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
 class AuditLog(Base):
@@ -97,33 +118,49 @@ class AuditLog(Base):
     Implements hash-chaining: each entry includes hash of previous entry.
     Schema: timestamp, event_id, actor, action, before_state, after_state, reasoning, prev_hash, entry_hash
     """
+
     __tablename__ = "audit_log"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime(timezone=True), default=utc_now, index=True)
     event_id = Column(Integer, ForeignKey("events.id"), nullable=True, index=True)
     actor = Column(String(100))  # "system" or username
-    action = Column(String(50))  # detect, enrich, decide, approve, reject, respond, close
+    action = Column(
+        String(50)
+    )  # detect, enrich, decide, approve, reject, respond, close
     before_state = Column(JSON)  # Previous state snapshot
-    after_state = Column(JSON)   # New state snapshot
+    after_state = Column(JSON)  # New state snapshot
     reasoning = Column(Text)  # Why this action was taken
     prev_hash = Column(String(64))  # SHA256 of previous audit entry
-    entry_hash = Column(String(64), index=True)  # SHA256 of this entry (for integrity check)
+    entry_hash = Column(
+        String(64), index=True
+    )  # SHA256 of this entry (for integrity check)
+
+
+class AuditAnchor(Base):
+    """Local chain head used to detect truncation of the latest audit entries."""
+
+    __tablename__ = "audit_anchor"
+
+    id = Column(Integer, primary_key=True, default=1)
+    latest_entry_id = Column(Integer, nullable=False)
+    latest_entry_hash = Column(String(64), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 def init_db(database_url: str = "sqlite:///./soar.db"):
     """
     Initialize the database with all tables.
-    
+
     Args:
         database_url: SQLAlchemy connection string
-    
+
     Returns:
         engine, SessionLocal factory
     """
     engine = create_engine(
         database_url,
-        connect_args={"check_same_thread": False} if "sqlite" in database_url else {}
+        connect_args={"check_same_thread": False} if "sqlite" in database_url else {},
     )
     Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

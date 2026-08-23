@@ -5,33 +5,35 @@ Validates target against lab allow-list for safety.
 Implements dry-run/simulation mode for testing.
 """
 
-import os
-import logging
 import ipaddress
-from typing import Optional, List
+import logging
+import os
+
 from netmiko import ConnectHandler
+
 from models import Decision, Event
 
 logger = logging.getLogger(__name__)
 
 # Lab allow-list: IPs/subnets that are permitted to block targets
-_LAB_ALLOW_LIST: List[ipaddress.IPv4Network] = []
+_LAB_ALLOW_LIST: list[ipaddress.IPv4Network] = []
 
 
-def init_lab_allowlist(env_csv: str = None):
+def init_lab_allowlist(env_csv: str | None = None):
     """
     Initialize lab allow-list from environment variable.
-    
+
     Comma-separated CIDR blocks, e.g.:
       LAB_ALLOWED_IPS=192.168.1.0/24,10.0.0.0/8
-    
+
     Args:
         env_csv: Override with explicit CSV (useful for testing)
     """
     global _LAB_ALLOW_LIST
-    
+    _LAB_ALLOW_LIST = []
+
     csv_str = env_csv or os.getenv("LAB_ALLOWED_IPS", "192.168.1.0/24,10.0.0.0/8")
-    
+
     for cidr in csv_str.split(","):
         cidr = cidr.strip()
         if cidr:
@@ -41,17 +43,17 @@ def init_lab_allowlist(env_csv: str = None):
                 logger.info(f"Added to lab allow-list: {net}")
             except ValueError as e:
                 logger.error(f"Invalid CIDR in allow-list: {cidr}: {e}")
-    
+
     logger.info(f"Lab allow-list initialized with {len(_LAB_ALLOW_LIST)} networks")
 
 
 def is_ip_in_lab_allowlist(ip: str) -> bool:
     """
     Check if an IP is in the lab allow-list.
-    
+
     Args:
         ip: IP address to check
-    
+
     Returns:
         True if IP is in allow-list, False otherwise
     """
@@ -69,48 +71,56 @@ def is_ip_in_lab_allowlist(ip: str) -> bool:
 
 
 def execute_response(
-    event: Event,
-    decision: Decision,
-    dry_run: bool = True,
-    simulation_mode: bool = True
-) -> Optional[dict]:
+    event: Event, decision: Decision, dry_run: bool = True, simulation_mode: bool = True
+) -> dict | None:
     """
     Execute response: push block rule to lab device.
-    
+
     Safety checks:
       1. Only runs after approval or auto-approval
       2. Target IP must be in lab allow-list
       3. Can run in dry-run/simulation mode without touching real device
-    
+
     Args:
         event: Security event
         decision: Decision to execute
         dry_run: If True, don't connect to real device
         simulation_mode: If True, log what would be sent instead of sending it
-    
+
     Returns:
         {"status": "success"/"failed", "message": "...", "commands_sent": [...]}
     """
-    
+
     # Validate action
     if decision.action != "block":
-        logger.warning(f"Decision action is '{decision.action}', not 'block'; skipping response")
+        logger.warning(
+            f"Decision action is '{decision.action}', not 'block'; skipping response"
+        )
         return {
             "status": "skipped",
-            "message": f"Response only executes on 'block' action, got '{decision.action}'"
+            "message": f"Response only executes on 'block' action, got '{decision.action}'",
         }
-    
-    # Validate target IP against allow-list
-    if not is_ip_in_lab_allowlist(event.source_ip):
-        logger.error(f"Target IP {event.source_ip} not in lab allow-list; blocking execution")
+
+    if event.status != "responding":
+        logger.error("Event %s is not in the claimed responding state", event.id)
         return {
             "status": "failed",
-            "message": f"Target IP {event.source_ip} not in lab allow-list"
+            "message": "Response execution was not safely claimed",
         }
-    
+
+    # Validate target IP against allow-list
+    if not is_ip_in_lab_allowlist(event.source_ip):
+        logger.error(
+            f"Target IP {event.source_ip} not in lab allow-list; blocking execution"
+        )
+        return {
+            "status": "failed",
+            "message": f"Target IP {event.source_ip} not in lab allow-list",
+        }
+
     # Generate commands
     commands = _generate_block_commands(event.source_ip)
-    
+
     if dry_run or simulation_mode:
         logger.info(f"[SIMULATION] Would execute on {event.source_ip}:")
         for cmd in commands:
@@ -118,24 +128,32 @@ def execute_response(
         return {
             "status": "simulation",
             "message": f"Simulated block of {event.source_ip}",
-            "commands_sent": commands
+            "commands_sent": commands,
         }
-    
+
     # Real execution: connect and push commands
+    handler = None
     try:
         device_ip = os.getenv("LAB_DEVICE_IP")
         device_username = os.getenv("LAB_DEVICE_USERNAME")
         device_password = os.getenv("LAB_DEVICE_PASSWORD")
         device_type = os.getenv("LAB_DEVICE_TYPE", "cisco_ios")
-        device_port = int(os.getenv("LAB_DEVICE_PORT", 22))
-        
+        device_port = int(os.getenv("LAB_DEVICE_PORT", "22"))
+
         if not all([device_ip, device_username, device_password]):
             logger.error("Lab device credentials not fully configured")
             return {
                 "status": "failed",
-                "message": "Lab device credentials not configured"
+                "message": "Lab device credentials not configured",
             }
-        
+
+        # Final fail-closed safety check immediately before opening a socket.
+        if not is_ip_in_lab_allowlist(event.source_ip) or not is_ip_in_lab_allowlist(
+            device_ip
+        ):
+            logger.error("Final lab safety check rejected target or device")
+            return {"status": "failed", "message": "Final lab safety check failed"}
+
         # Connect via Netmiko
         handler = ConnectHandler(
             device_type=device_type,
@@ -143,66 +161,69 @@ def execute_response(
             username=device_username,
             password=device_password,
             port=device_port,
-            timeout=10
+            timeout=10,
         )
-        
+
         # Send commands
         output = handler.send_config_set(commands)
-        handler.disconnect()
-        
+
         logger.info(f"Successfully pushed block rules for {event.source_ip}")
         return {
             "status": "success",
             "message": f"Block rule applied to {event.source_ip}",
             "commands_sent": commands,
-            "device_output": output
-        }
-    
-    except Exception as e:
-        logger.error(f"Failed to connect/push commands: {e}")
-        return {
-            "status": "failed",
-            "message": f"Connection/execution error: {str(e)}"
+            "device_output": output,
         }
 
+    except Exception:
+        logger.exception("Failed to connect/push commands")
+        return {"status": "failed", "message": "Connection or command execution failed"}
+    finally:
+        if handler is not None:
+            try:
+                handler.disconnect()
+            except Exception:
+                logger.warning(
+                    "Failed to disconnect cleanly from lab device", exc_info=True
+                )
 
-def _generate_block_commands(source_ip: str) -> List[str]:
+
+def _generate_block_commands(source_ip: str) -> list[str]:
     """
     Generate device-specific ACL commands to block an IP.
-    
+
     Example for Cisco IOS:
       access-list 100 deny ip any host 192.168.1.100
       access-list 100 permit ip any any
-    
+
     Args:
         source_ip: IP to block
-    
+
     Returns:
         List of command strings
     """
     device_type = os.getenv("LAB_DEVICE_TYPE", "cisco_ios")
-    
+
     if device_type == "cisco_ios":
         return [
-            "conf t",
-            f"access-list 100 deny ip any host {source_ip}",
-            "access-list 100 permit ip any any",
-            "int GigabitEthernet0/0",
-            "ip access-group 100 in",
+            "ip access-list extended SOAR_BLOCK",
+            f"no deny ip host {source_ip} any",
+            f"deny ip host {source_ip} any",
             "exit",
+            "interface GigabitEthernet0/0",
+            "ip access-group SOAR_BLOCK in",
             "exit",
-            "write memory"
         ]
-    
+
     elif device_type == "juniper_junos":
         return [
             "configure",
             f"set firewall filter BLOCK_LIST from destination-address {source_ip}/32",
             "set firewall filter BLOCK_LIST then discard",
             "exit",
-            "commit"
+            "commit",
         ]
-    
+
     else:
         # Generic fallback
         logger.warning(f"Unknown device type {device_type}; using generic commands")

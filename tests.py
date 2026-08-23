@@ -3,20 +3,20 @@ Unit tests for SOAR platform: enrichment, decision engine, and API endpoints.
 Run with: pytest tests/ -v
 """
 
+from datetime import datetime, timezone
+
 import pytest
-from datetime import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from models import Base, Event, EnrichmentResult, Decision, init_db
-from enrichment import enrich_ip, clear_cache
 from decision_engine import decide, load_config
-import config as cfg_module
-
+from enrichment import clear_cache, enrich_ip
+from models import Base, EnrichmentResult, Event
 
 # ============================================================================
 # Fixtures: In-memory database for testing
 # ============================================================================
+
 
 @pytest.fixture(scope="function")
 def test_db():
@@ -33,12 +33,13 @@ def test_db():
 # Enrichment Tests
 # ============================================================================
 
+
 def test_enrich_ip_missing_api_key(test_db, monkeypatch):
     """Test enrichment gracefully handles missing API key."""
     monkeypatch.delenv("ABUSEIPDB_API_KEY", raising=False)
-    
+
     result = enrich_ip("192.168.1.100", test_db)
-    
+
     assert result is not None
     assert result.error is not None
     assert "API key" in result.error
@@ -46,9 +47,11 @@ def test_enrich_ip_missing_api_key(test_db, monkeypatch):
 
 def test_enrich_ip_caching(test_db, monkeypatch):
     """Test enrichment caching: second call returns cached result."""
+
     # Mock the API to return a result
     class MockResponse:
         status_code = 200
+
         def json(self):
             return {
                 "data": {
@@ -56,25 +59,23 @@ def test_enrich_ip_caching(test_db, monkeypatch):
                     "countryCode": "US",
                     "isp": "Evil ISP",
                     "totalReports": 50,
-                    "usageType": "Residential"
+                    "usageType": "Residential",
                 }
             }
-    
+
     def mock_get(*args, **kwargs):
         return MockResponse()
-    
+
     monkeypatch.setenv("ABUSEIPDB_API_KEY", "test_key")
     monkeypatch.setattr("enrichment.requests.get", mock_get)
-    
+
     # First call
     clear_cache()
     result1 = enrich_ip("192.168.1.100", test_db)
-    count1 = test_db.query(EnrichmentResult).count()
-    
     # Second call (should use cache)
     result2 = enrich_ip("192.168.1.100", test_db)
     count2 = test_db.query(EnrichmentResult).count()
-    
+
     # Both should succeed
     assert result1.abuse_score == 75
     assert result2.abuse_score == 75
@@ -86,22 +87,23 @@ def test_enrich_ip_caching(test_db, monkeypatch):
 # Decision Engine Tests
 # ============================================================================
 
+
 def test_decision_engine_high_risk_block(test_db):
     """Test decision engine blocks high-risk IP."""
     load_config("config.yaml")
-    
+
     # Create event: high severity
     event = Event(
         source_ip="192.168.1.100",
         event_type="port_scan",
         severity=5,  # critical
         raw_log_line="SYN scan detected",
-        timestamp=datetime.utcnow(),
-        status="enriched"
+        timestamp=datetime.now(timezone.utc),
+        status="enriched",
     )
     test_db.add(event)
     test_db.flush()
-    
+
     # Create enrichment: high abuse score
     enrichment = EnrichmentResult(
         event_id=event.id,
@@ -110,14 +112,14 @@ def test_decision_engine_high_risk_block(test_db):
         country="US",
         isp="Evil ISP",
         report_count=150,
-        cache_ttl_minutes=60
+        cache_ttl_minutes=60,
     )
     test_db.add(enrichment)
     test_db.commit()
-    
+
     # Decide
     decision = decide(event, enrichment)
-    
+
     # Should recommend block
     assert decision.action == "block"
     assert decision.risk_score > 75  # High risk
@@ -127,18 +129,18 @@ def test_decision_engine_high_risk_block(test_db):
 def test_decision_engine_medium_risk_monitor(test_db):
     """Test decision engine monitors medium-risk IP."""
     load_config("config.yaml")
-    
+
     event = Event(
         source_ip="10.0.0.50",
         event_type="failed_login",
         severity=3,  # medium
         raw_log_line="Multiple failed SSH logins",
-        timestamp=datetime.utcnow(),
-        status="enriched"
+        timestamp=datetime.now(timezone.utc),
+        status="enriched",
     )
     test_db.add(event)
     test_db.flush()
-    
+
     # Medium abuse score
     enrichment = EnrichmentResult(
         event_id=event.id,
@@ -147,13 +149,13 @@ def test_decision_engine_medium_risk_monitor(test_db):
         country="CN",
         isp="Unknown",
         report_count=10,
-        cache_ttl_minutes=60
+        cache_ttl_minutes=60,
     )
     test_db.add(enrichment)
     test_db.commit()
-    
+
     decision = decide(event, enrichment)
-    
+
     # Should recommend monitor
     assert decision.action == "monitor"
     assert 50 <= decision.risk_score < 75
@@ -162,18 +164,18 @@ def test_decision_engine_medium_risk_monitor(test_db):
 def test_decision_engine_low_risk_ignore(test_db):
     """Test decision engine ignores low-risk IP."""
     load_config("config.yaml")
-    
+
     event = Event(
         source_ip="8.8.8.8",  # Google DNS
         event_type="dns_query",
         severity=1,  # info
         raw_log_line="DNS query",
-        timestamp=datetime.utcnow(),
-        status="enriched"
+        timestamp=datetime.now(timezone.utc),
+        status="enriched",
     )
     test_db.add(event)
     test_db.flush()
-    
+
     enrichment = EnrichmentResult(
         event_id=event.id,
         source_ip="8.8.8.8",
@@ -181,13 +183,13 @@ def test_decision_engine_low_risk_ignore(test_db):
         country="US",
         isp="Google",
         report_count=0,
-        cache_ttl_minutes=60
+        cache_ttl_minutes=60,
     )
     test_db.add(enrichment)
     test_db.commit()
-    
+
     decision = decide(event, enrichment)
-    
+
     # Should recommend ignore
     assert decision.action == "ignore"
     assert decision.risk_score < 50
@@ -196,18 +198,18 @@ def test_decision_engine_low_risk_ignore(test_db):
 def test_decision_engine_reasoning_logged(test_db):
     """Test that decision reasoning is captured."""
     load_config("config.yaml")
-    
+
     event = Event(
         source_ip="192.168.1.100",
         event_type="port_scan",
         severity=4,
         raw_log_line="SYN scan",
-        timestamp=datetime.utcnow(),
-        status="enriched"
+        timestamp=datetime.now(timezone.utc),
+        status="enriched",
     )
     test_db.add(event)
     test_db.flush()
-    
+
     enrichment = EnrichmentResult(
         event_id=event.id,
         source_ip="192.168.1.100",
@@ -215,18 +217,18 @@ def test_decision_engine_reasoning_logged(test_db):
         country="RU",
         isp="RuNet",
         report_count=80,
-        cache_ttl_minutes=60
+        cache_ttl_minutes=60,
     )
     test_db.add(enrichment)
     test_db.commit()
-    
+
     decision = decide(event, enrichment)
-    
+
     # Check reasoning contains expected keys
     assert "risk_calculation" in decision.reasoning
     assert "confidence_factors" in decision.reasoning
     assert "approval_reasons" in decision.reasoning
-    
+
     # Verify risk calculation details are logged
     risk_calc = decision.reasoning["risk_calculation"]
     assert risk_calc["abuse_score"] == 70.0
@@ -238,10 +240,11 @@ def test_decision_engine_reasoning_logged(test_db):
 # Audit Log Tests
 # ============================================================================
 
+
 def test_audit_log_hash_chain_integrity(test_db):
     """Test that audit log hash chain detects tampering."""
     from audit_log import create_audit_entry, verify_audit_chain
-    
+
     # Create a few audit entries
     for i in range(3):
         create_audit_entry(
@@ -251,26 +254,33 @@ def test_audit_log_hash_chain_integrity(test_db):
             before_state=None,
             after_state={"step": i},
             reasoning="Test",
-            session=test_db
+            session=test_db,
         )
-    
+
     # Chain should be valid
-    assert verify_audit_chain(test_db) == True
-    
+    assert verify_audit_chain(test_db)
+
     # Tamper with an entry
-    entries = test_db.query(Base).all()  # Would query audit table in real scenario
-    # (Actual tampering test would modify DB directly, which is hard to mock here)
+    from models import AuditLog
+
+    entry = test_db.query(AuditLog).filter_by(id=1).one()
+    entry.reasoning = "tampered"
+    test_db.commit()
+    assert verify_audit_chain(test_db) is False
 
 
 # ============================================================================
 # API Endpoint Tests (Integration)
 # ============================================================================
 
+
 @pytest.fixture
 def client():
     """Create FastAPI test client."""
     from fastapi.testclient import TestClient
+
     from main import app
+
     return TestClient(app)
 
 
@@ -288,20 +298,36 @@ def test_detection_intake_endpoint(client):
         "event_type": "port_scan",
         "severity": 4,
         "raw_log_line": "SYN scan from X to ports Y",
-        "timestamp": "2026-08-19T10:00:00Z"
+        "timestamp": "2026-08-19T10:00:00Z",
     }
-    
-    response = client.post("/detections", json=payload)
-    # Note: Will fail if API key not set, but should return status code
-    assert response.status_code in [200, 500]
+
+    response = client.post("/detections", json=payload, auth=("admin", "admin"))
+    assert response.status_code == 200
 
 
 def test_dashboard_endpoint(client):
     """Test GET / (dashboard) renders HTML."""
+    login_response = client.post(
+        "/login",
+        data={"username": "admin", "password": "admin"},
+        allow_redirects=False,
+    )
     response = client.get("/")
+
+    assert login_response.status_code == 303
     assert response.status_code == 200
     assert "SOAR Platform" in response.text
     assert "<table>" in response.text
+
+
+def test_dashboard_requires_authentication(client):
+    """Dashboard and its live data must reject anonymous requests."""
+    dashboard_response = client.get("/", allow_redirects=False)
+    data_response = client.get("/dashboard/data")
+
+    assert dashboard_response.status_code == 303
+    assert dashboard_response.headers["location"] == "/login"
+    assert data_response.status_code == 401
 
 
 if __name__ == "__main__":

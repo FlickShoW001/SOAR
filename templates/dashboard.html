@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>SOAR Command Center</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
+</head>
+<body data-role="{{ current_role }}">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <a class="brand" href="/" aria-label="SOAR Command Center home">
+        <span class="brand-mark">S</span>
+        <span><strong>SOAR</strong><small>Command Center</small></span>
+      </a>
+
+      <nav class="nav-list">
+        <a class="nav-item active" href="#overview"><span>⌂</span> Overview</a>
+        <a class="nav-item" href="#approvals"><span>✓</span> Approvals</a>
+        <a class="nav-item" href="#decisions"><span>⌁</span> Decisions</a>
+        <a class="nav-item" href="#audit"><span>▤</span> Audit trail</a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span class="pulse-dot" aria-hidden="true"></span>
+        <span><strong>System online</strong><small id="last-sync">Connecting…</small></span>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Security operations</p>
+          <h1>Command center</h1>
+        </div>
+        <div class="topbar-actions">
+          <label class="search-box">
+            <span>⌕</span>
+            <input id="global-search" type="search" placeholder="Filter events, IPs, actions…" aria-label="Filter dashboard data">
+          </label>
+          <div class="operator">
+            <span class="avatar">{{ current_user[0]|upper }}</span>
+            <span><strong>{{ current_user }}</strong><small>{{ current_role|title }}</small></span>
+          </div>
+          <form action="/logout" method="post">
+            <button class="signout-button" type="submit">Sign out</button>
+          </form>
+        </div>
+      </header>
+
+      <section class="hero" id="overview">
+        <div>
+          <span class="live-label"><i></i> Live monitoring</span>
+          <h2>Security posture at a glance</h2>
+          <p>Review automated decisions, approve high-impact actions, and verify every step in the response chain.</p>
+        </div>
+        <div class="chain-card" id="chain-card">
+          <span class="chain-icon">✓</span>
+          <span><small>Audit integrity</small><strong id="chain-status">Checking…</strong></span>
+        </div>
+      </section>
+
+      <section class="metric-grid" aria-label="Current metrics">
+        <article class="metric-card warning">
+          <span class="metric-icon">!</span>
+          <div><small>Pending approvals</small><strong id="pending-count">—</strong><p>Requires operator review</p></div>
+        </article>
+        <article class="metric-card blue">
+          <span class="metric-icon">⌁</span>
+          <div><small>Recent decisions</small><strong id="decision-count">—</strong><p>Latest automated outcomes</p></div>
+        </article>
+        <article class="metric-card violet">
+          <span class="metric-icon">▤</span>
+          <div><small>Audit entries</small><strong id="audit-count">—</strong><p>Recent verified records</p></div>
+        </article>
+      </section>
+
+      <section class="panel priority-panel" id="approvals">
+        <div class="panel-heading">
+          <div><p class="eyebrow">Action required</p><h2>Pending approvals <span class="count-pill" id="pending-pill">0</span></h2></div>
+          <button class="ghost-button" type="button" data-refresh>Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Event</th><th>Source</th><th>Detection type</th><th>Severity</th><th>Status</th><th class="align-right">Actions</th></tr></thead>
+            <tbody id="pending-body"><tr><td colspan="6" class="empty-state">Loading approvals…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="content-grid">
+        <section class="panel" id="decisions">
+          <div class="panel-heading"><div><p class="eyebrow">Automation</p><h2>Recent decisions</h2></div></div>
+          <div class="table-wrap compact-table">
+            <table>
+              <thead><tr><th>Event</th><th>Action</th><th>Risk</th><th>Confidence</th><th>Approval</th></tr></thead>
+              <tbody id="decisions-body"><tr><td colspan="5" class="empty-state">Loading decisions…</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel" id="audit">
+          <div class="panel-heading"><div><p class="eyebrow">Evidence</p><h2>Audit trail</h2></div></div>
+          <div class="timeline" id="audit-list"><p class="empty-state">Loading audit entries…</p></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="event-dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">Event intelligence</p><h2 id="dialog-title">Event details</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="Close event details">×</button></div>
+    <div id="dialog-content" class="dialog-content"></div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

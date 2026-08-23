@@ -1,0 +1,11 @@
+[tool.ruff]
+target-version = "py312"
+exclude = ["venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = [
+    "B008",   # FastAPI uses dependency calls in parameter defaults by design.
+    "BLE001", # WebSocket broadcasts must tolerate transport-specific failures.
+    "E501",   # Ruff's formatter intentionally leaves some long strings intact.
+]

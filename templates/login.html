@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Admin Sign In · SOAR Command Center</title>
+  <link rel="stylesheet" href="/static/login.css">
+  <script src="/static/login.js" defer></script>
+</head>
+<body>
+  <main class="login-shell">
+    <section class="security-panel" aria-label="SOAR platform overview">
+      <div class="brand"><span class="brand-mark">S</span><span><strong>SOAR</strong><small>Command Center</small></span></div>
+      <div class="security-copy">
+        <p class="eyebrow"><i></i> Protected operations console</p>
+        <h1>Respond with confidence.</h1>
+        <p>One secure workspace for detection review, automated decisions, operator approvals, and tamper-evident audit history.</p>
+      </div>
+      <div class="assurance-grid">
+        <article><span>✓</span><div><strong>Human approval gate</strong><small>High-impact actions require operator review.</small></div></article>
+        <article><span>⌁</span><div><strong>Explainable decisions</strong><small>Every risk score includes its reasoning.</small></div></article>
+        <article><span>▤</span><div><strong>Verified audit chain</strong><small>Response activity remains traceable.</small></div></article>
+      </div>
+      <p class="panel-foot">Security orchestration · Automation · Response</p>
+    </section>
+
+    <section class="form-panel">
+      <div class="form-wrap">
+        <div class="mobile-brand"><span class="brand-mark">S</span><strong>SOAR</strong></div>
+        <p class="eyebrow">Administrator access</p>
+        <h2>Welcome back</h2>
+        <p class="intro">Sign in to review the current security posture and pending actions.</p>
+
+        {% if error %}
+        <div class="error-message" role="alert"><span>!</span>{{ error }}</div>
+        {% endif %}
+
+        <form action="/login" method="post" class="login-form">
+          <label>
+            <span>Username</span>
+            <div class="input-shell"><i>●</i><input name="username" type="text" autocomplete="username" required autofocus></div>
+          </label>
+          <label>
+            <span>Password</span>
+            <div class="input-shell"><i>◆</i><input id="password" name="password" type="password" autocomplete="current-password" required><button type="button" id="toggle-password" aria-label="Show password">Show</button></div>
+          </label>
+          <button class="submit-button" type="submit"><span>Sign in to command center</span><b>→</b></button>
+        </form>
+
+        <div class="session-note"><span>⌾</span><p><strong>Secure administrator session</strong><small>Your session expires automatically after eight hours.</small></p></div>
+        <p class="support">Authorized personnel only · Contact your system administrator for access</p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
