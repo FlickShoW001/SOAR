@@ -342,6 +342,6 @@ This is a graduation project for Cybersecurity Diploma studies. Customize freely
 
 ## Author
 
-**mahmoudali-dot** — Built for practical security automation & orchestration learning.
+*'Mahmoud Ali** — Built for practical security automation & orchestration learning.
 
 For questions or improvements, create an issue or pull request.
