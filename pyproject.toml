@@ -1,6 +1,6 @@
 [tool.ruff]
 target-version = "py312"
-exclude = ["venv"]
+exclude = ["venv", "SOAR"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
@@ -9,3 +9,6 @@ ignore = [
     "BLE001", # WebSocket broadcasts must tolerate transport-specific failures.
     "E501",   # Ruff's formatter intentionally leaves some long strings intact.
 ]
+
+[tool.pytest.ini_options]
+norecursedirs = ["venv", "SOAR"]

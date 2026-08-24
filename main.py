@@ -13,7 +13,9 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import (
     Depends,
     FastAPI,
@@ -46,17 +48,47 @@ from enrichment import enrich_ip
 from models import Approval, AuditLog, Decision, EnrichmentResult, Event, init_db
 from responder import execute_response, init_lab_allowlist
 
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+
 # Configure logging
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _database_url() -> str:
+    """Return a stable database URL independent of the launch directory."""
+    configured = os.getenv("DATABASE_URL")
+    if not configured:
+        return f"sqlite:///{BASE_DIR / 'soar.db'}"
+    prefix = "sqlite:///"
+    if configured.startswith(prefix):
+        database_path = configured[len(prefix) :]
+        if database_path and not Path(database_path).is_absolute():
+            return f"{prefix}{(BASE_DIR / database_path).resolve()}"
+    return configured
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    """Read a positive integer setting without making startup brittle."""
+    try:
+        value = int(os.getenv(name, str(default)))
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
+
 ADMIN_USERNAME = os.getenv("SOAR_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("SOAR_ADMIN_PASSWORD", "admin")
 VALID_ROLES = {"admin", "operator", "viewer"}
 SESSION_COOKIE_NAME = "soar_session"
-SESSION_TTL_SECONDS = int(os.getenv("SOAR_SESSION_TTL_SECONDS", "28800"))
+SESSION_TTL_SECONDS = _positive_env_int("SOAR_SESSION_TTL_SECONDS", 28_800)
+ENRICHMENT_CACHE_TTL_MINUTES = _positive_env_int(
+    "ABUSEIPDB_CACHE_TTL_MINUTES", 60
+)
 SESSION_SECRET_CONFIGURED = bool(os.getenv("SOAR_SESSION_SECRET"))
 SESSION_SECRET = os.getenv("SOAR_SESSION_SECRET") or secrets.token_urlsafe(32)
 SESSION_COOKIE_SECURE = (
@@ -92,11 +124,11 @@ def _load_users() -> dict[str, dict[str, str]]:
 AUTH_USERS = _load_users()
 
 # Initialize database
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./soar.db")
+DATABASE_URL = _database_url()
 engine, SessionLocal = init_db(DATABASE_URL)
 
 # Load configuration files
-load_decision_config("config.yaml")
+load_decision_config(str(BASE_DIR / "config.yaml"))
 init_lab_allowlist()
 
 # FastAPI app
@@ -105,10 +137,9 @@ app = FastAPI(
     description="Security Orchestration, Automation, and Response platform",
     version="1.0.0",
 )
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.mount(
-    "/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static"
+    "/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static"
 )
 
 
@@ -231,6 +262,13 @@ require_viewer = require_roles("admin", "operator", "viewer")
 require_operator = require_roles("admin", "operator")
 require_admin = require_roles("admin")
 
+
+def _isoformat_utc(value: datetime) -> str:
+    """Serialize database timestamps unambiguously for browser clients."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
 # ============================================================================
 # Pydantic Models (Request/Response)
 # ============================================================================
@@ -339,7 +377,12 @@ def post_detection(
         audit_event_detection(event, db, actor=current_user.username)
 
         # Step 3: Enrich immediately (synchronously for simplicity; could be async)
-        enrichment = enrich_ip(str(req.source_ip), db, event.id)
+        enrichment = enrich_ip(
+            str(req.source_ip),
+            db,
+            event.id,
+            cache_ttl_minutes=ENRICHMENT_CACHE_TTL_MINUTES,
+        )
         event.status = "enriched"
         db.commit()
         audit_enrichment(event, enrichment, db, actor=current_user.username)
@@ -431,6 +474,11 @@ def approve_decision(
             raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
 
         decision = db.query(Decision).filter_by(event_id=event_id).first()
+        if not decision:
+            raise HTTPException(
+                status_code=409,
+                detail="Event has no decision available for review",
+            )
         approval = db.query(Approval).filter_by(event_id=event_id).first()
 
         if not approval:
@@ -576,18 +624,38 @@ def dashboard(
 
 @app.get("/dashboard/data")
 def dashboard_data(
+    response: Response,
     current_user: UserIdentity = Depends(require_viewer),
     db: Session = Depends(get_db),
 ):
     """Return dashboard data for live updates."""
+    response.headers["Cache-Control"] = "no-store"
 
-    pending = db.query(Event).filter_by(status="pending_approval").all()
+    pending = (
+        db.query(Event)
+        .filter_by(status="pending_approval")
+        .order_by(Event.id.desc())
+        .all()
+    )
+
+    recent_events = db.query(Event).order_by(Event.id.desc()).limit(20).all()
 
     recent_decisions = db.query(Decision).order_by(Decision.id.desc()).limit(10).all()
 
     recent_audit = db.query(AuditLog).order_by(AuditLog.id.desc()).limit(20).all()
 
     return {
+        "events": [
+            {
+                "id": e.id,
+                "source_ip": e.source_ip,
+                "event_type": e.event_type,
+                "severity": e.severity,
+                "status": e.status,
+                "timestamp": _isoformat_utc(e.timestamp),
+            }
+            for e in recent_events
+        ],
         "pending": [
             {
                 "id": e.id,
@@ -610,11 +678,11 @@ def dashboard_data(
         ],
         "audit": [
             {
-                "timestamp": a.timestamp.isoformat(),
+                "timestamp": _isoformat_utc(a.timestamp),
                 "actor": a.actor,
                 "action": a.action,
                 "event_id": a.event_id,
-                "hash": a.entry_hash[:16] + "...",
+                "hash": f"{a.entry_hash[:16]}..." if a.entry_hash else "Unavailable",
             }
             for a in recent_audit
         ],
@@ -645,7 +713,7 @@ def get_event(
             "event_type": event.event_type,
             "severity": event.severity,
             "status": event.status,
-            "timestamp": event.timestamp.isoformat(),
+            "timestamp": _isoformat_utc(event.timestamp),
         },
         "enrichment": {
             "abuse_score": enrichment.abuse_score if enrichment else None,
@@ -671,7 +739,7 @@ def get_event(
         else None,
         "audit_trail": [
             {
-                "timestamp": a.timestamp.isoformat(),
+                "timestamp": _isoformat_utc(a.timestamp),
                 "actor": a.actor,
                 "action": a.action,
                 "reasoning": a.reasoning,

@@ -118,6 +118,8 @@ def _calculate_risk_score(
     # If enrichment failed, use conservative estimates
     abuse_score = enrichment.abuse_score if not enrichment.error else 0.0
     report_count = enrichment.report_count if not enrichment.error else 0
+    abuse_score = max(0.0, min(float(abuse_score or 0.0), 100.0))
+    report_count = max(0, int(report_count or 0))
 
     # Normalize abuse_score (already 0-100)
     norm_abuse = abuse_score / 100.0
@@ -178,10 +180,11 @@ def _determine_confidence(
         # Enrichment succeeded
         factors = []
 
-        if enrichment.report_count > 10:
+        report_count = max(0, int(enrichment.report_count or 0))
+        if report_count > 10:
             confidence += 0.3  # Well-established reputation
             factors.append("high_report_count")
-        elif enrichment.report_count > 0:
+        elif report_count > 0:
             confidence += 0.15  # Some history
             factors.append("some_reports")
 
@@ -238,32 +241,43 @@ def _requires_approval(
     rules = cfg["approval_rules"]
     approval_reasons = []
 
+    # Safety rules take precedence over action-specific auto-approval. Otherwise
+    # a critical or unknown event classified as "ignore" would bypass review.
+
     # Rule 1: BLOCK always requires approval
     if action == "block" and rules["block_requires_approval"]:
         approval_reasons.append("action_is_block")
-        reasoning["approval_reasons"] = approval_reasons
-        return True
 
-    # Rule 2: IGNORE never requires approval
-    if action == "ignore" and not rules["ignore_requires_approval"]:
-        reasoning["approval_reasons"] = ["action_is_ignore"]
-        return False
-
-    # Rule 3: High-severity events require approval
+    # Rule 2: High-severity events require approval
     if event.severity >= 4 and rules["high_severity_requires_approval"]:
         approval_reasons.append("high_severity_event")
 
-    # Rule 4: MONITOR actions auto-approve if risk is low enough
+    # Rule 3: Unknown IPs require approval when configured.
+    if rules["uncached_ip_requires_approval"] and (
+        enrichment.error or not enrichment.report_count
+    ):
+        approval_reasons.append("uncached_or_unknown_ip")
+
+    if approval_reasons:
+        reasoning["approval_reasons"] = approval_reasons
+        return True
+
+    # Rule 4: IGNORE follows its explicit approval setting.
+    if action == "ignore":
+        reasoning["approval_reasons"] = (
+            ["ignore_requires_approval"]
+            if rules["ignore_requires_approval"]
+            else ["action_is_ignore"]
+        )
+        return rules["ignore_requires_approval"]
+
+    # Rule 5: MONITOR actions auto-approve if risk is low enough
     if action == "monitor":
         if risk_score < rules["monitor_auto_approve_max_risk"]:
             reasoning["approval_reasons"] = ["monitor_low_risk"]
             return False
         else:
             approval_reasons.append("monitor_high_risk")
-
-    # Rule 5: Uncached IPs (no enrichment data) require approval
-    if enrichment.error or enrichment.report_count == 0:
-        approval_reasons.append("uncached_or_unknown_ip")
 
     reasoning["approval_reasons"] = approval_reasons
     return len(approval_reasons) > 0

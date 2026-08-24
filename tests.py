@@ -236,6 +236,64 @@ def test_decision_engine_reasoning_logged(test_db):
     assert risk_calc["report_count"] == 80
 
 
+def test_high_severity_ignore_still_requires_human_approval(test_db):
+    """Critical events cannot bypass review because their risk action is ignore."""
+    load_config("config.yaml")
+    event = Event(
+        source_ip="192.168.1.100",
+        event_type="critical_unknown_activity",
+        severity=5,
+        raw_log_line="Critical event with unavailable enrichment",
+        timestamp=datetime.now(timezone.utc),
+        status="enriched",
+    )
+    test_db.add(event)
+    test_db.flush()
+    enrichment = EnrichmentResult(
+        event_id=event.id,
+        source_ip=event.source_ip,
+        abuse_score=None,
+        report_count=None,
+        error="Enrichment unavailable",
+        cache_ttl_minutes=60,
+    )
+
+    decision = decide(event, enrichment)
+
+    assert decision.action == "ignore"
+    assert decision.requires_approval is True
+    assert "high_severity_event" in decision.reasoning["approval_reasons"]
+    assert "uncached_or_unknown_ip" in decision.reasoning["approval_reasons"]
+
+
+def test_unknown_ip_approval_rule_is_honored(test_db):
+    """The configured unknown-IP rule must apply to low-severity events too."""
+    load_config("config.yaml")
+    event = Event(
+        source_ip="192.168.1.101",
+        event_type="unknown_activity",
+        severity=1,
+        raw_log_line="Low severity event with unavailable enrichment",
+        timestamp=datetime.now(timezone.utc),
+        status="enriched",
+    )
+    test_db.add(event)
+    test_db.flush()
+    enrichment = EnrichmentResult(
+        event_id=event.id,
+        source_ip=event.source_ip,
+        abuse_score=None,
+        report_count=None,
+        error="Enrichment unavailable",
+        cache_ttl_minutes=60,
+    )
+
+    decision = decide(event, enrichment)
+
+    assert decision.requires_approval is True
+    assert decision.reasoning["approval_reasons"] == ["uncached_or_unknown_ip"]
+
+
 # ============================================================================
 # Audit Log Tests
 # ============================================================================
@@ -328,6 +386,52 @@ def test_dashboard_requires_authentication(client):
     assert dashboard_response.status_code == 303
     assert dashboard_response.headers["location"] == "/login"
     assert data_response.status_code == 401
+
+
+def test_dashboard_data_includes_events_that_do_not_need_approval(client):
+    """All detections remain visible, including automatically handled events."""
+    payload = {
+        "source_ip": "192.168.1.100",
+        "event_type": "dns_query",
+        "severity": 1,
+        "raw_log_line": "Benign synthetic dashboard event",
+    }
+    detection_response = client.post(
+        "/detections", json=payload, auth=("admin", "admin")
+    )
+    assert detection_response.status_code == 200
+
+    data_response = client.get("/dashboard/data", auth=("admin", "admin"))
+    assert data_response.status_code == 200
+    event_id = detection_response.json()["id"]
+    assert any(event["id"] == event_id for event in data_response.json()["events"])
+
+
+def test_dashboard_data_does_not_truncate_pending_approvals(test_db):
+    """Every pending event must remain actionable in the approval queue."""
+    from fastapi import Response
+
+    from main import UserIdentity, dashboard_data
+
+    for index in range(25):
+        test_db.add(
+            Event(
+                source_ip=f"192.168.1.{index + 1}",
+                event_type="approval_test",
+                severity=5,
+                raw_log_line="Synthetic pending event",
+                timestamp=datetime.now(timezone.utc),
+                status="pending_approval",
+            )
+        )
+    test_db.commit()
+
+    response = Response()
+    data = dashboard_data(response, UserIdentity("admin", "admin"), test_db)
+
+    assert len(data["pending"]) == 25
+    assert data["pending"][0]["id"] > data["pending"][-1]["id"]
+    assert response.headers["cache-control"] == "no-store"
 
 
 if __name__ == "__main__":
