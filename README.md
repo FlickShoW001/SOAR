@@ -1,347 +1,306 @@
-# SOAR Platform - Lightweight Security Orchestration, Automation & Response
+# SOAR Operations Platform
 
-A complete detect → enrich → decide → approve → respond → log pipeline for security events, built with FastAPI and Python for a Cybersecurity Diploma graduation project.
+A security orchestration, automation, and response application for controlled cyber-range and laboratory environments. SOAR accepts authenticated detections, enriches source IPs through AbuseIPDB, produces explainable risk decisions, places high-impact actions behind a human approval gate, and records every transition in a tamper-evident audit chain.
 
-## Features
+> [!IMPORTANT]
+> This project is simulation-first and intended for an isolated lab. Real network changes must only be enabled after validating device commands, interface names, allow-lists, credentials, rollback procedures, and operational ownership.
 
-### 1. Detection Intake
-- **POST `/detections`** endpoint accepts JSON security events
-- Captures: source IP, event type, severity (1-5), raw log line, timestamp
-- Automatically persists to SQLite database with status "new"
+## Highlights
 
-### 2. Enrichment
-- Queries **AbuseIPDB API** for IP reputation data
-- Returns: abuse score, country, ISP, report count, VPN/Proxy detection
-- **In-memory caching** prevents duplicate API calls within TTL window
-- Gracefully handles: timeouts, 429 rate limits, invalid API keys
-- Environment variable `ABUSEIPDB_API_KEY` (never hardcoded)
+- Professional, responsive operations console with live polling, search, event intelligence, decision risk indicators, approval workflows, and audit-chain health
+- Validated IPv4 and IPv6 detection intake with authenticated role-based access
+- AbuseIPDB enrichment with process-local TTL caching and recorded failure states
+- Configurable weighted risk scoring with human-readable decision reasoning
+- Atomic approval claims that prevent an event from being reviewed twice
+- Fail-closed Cisco IOS and Juniper Junos response connector
+- Dry-run and simulation modes enabled by default
+- Tamper-evident SHA-256 audit chain with local and optional external anchors
+- Browser security headers, signed HTTP-only sessions, and separate admin/operator/viewer permissions
+- Focused regression suite for authentication, validation, dashboard caching, and pipeline failure recovery
 
-### 3. Decision Engine
-- **Rule-based risk scoring** (0-100) from weighted factors:
-  - Abuse score (40% weight)
-  - Event severity (35% weight)
-  - Report count (25% weight)
-- Explainable decisions with detailed reasoning logged
-- Configurable thresholds in `config.yaml` (no magic numbers in code)
-- Recommends: **BLOCK**, **MONITOR**, or **IGNORE**
+## How the platform works
 
-### 4. Approval Gate
-- Decisions marked `requires_approval=True` block execution until human approval
-- Clear rules in `config.yaml` define "impactful" actions:
-  - All BLOCK actions require approval
-  - High-severity events require approval
-  - Low-risk MONITOR/IGNORE actions auto-approve
-- **POST `/approvals/{event_id}`** endpoint for approve/reject with audit trail
-
-### 5. Response Connector
-- **Netmiko integration** to push ACL rules to lab firewall/router
-- Device credentials from environment variables only (no hardcoded secrets)
-- **Lab IP allow-list** validation before any device connection
-- **Dry-run & simulation mode** for safe testing
-- Device type support: Cisco IOS, Juniper JunOS (extensible)
-- Only executes after status is "approved" or auto-approved
-
-### 6. Audit Trail (Tamper-Evident)
-- **Hash-chaining**: each audit entry includes SHA256 hash of previous entry
-- Detects tampering: `verify_audit_chain()` breaks if any entry is modified
-- Tracks: timestamp, event_id, actor, action, before/after state, reasoning
-- Every pipeline stage writes: detect, enrich, decide, approve, respond, close
-
-### 7. Dashboard
-- **GET `/`** renders real-time HTML dashboard
-- Shows: pending approvals, recent decisions, audit log
-- Filter by status, severity, IP address
-- Displays audit chain integrity status
-
-### 8. Storage
-- **SQLite** via SQLAlchemy (persistent, not in-memory)
-- Models: `Event`, `EnrichmentResult`, `Decision`, `Approval`, `AuditLog`
-
----
-
-## Project Structure
-
-```
-soar-platform/
-├── main.py                 # FastAPI application (detect → decide → respond pipeline)
-├── models.py               # SQLAlchemy database models
-├── enrichment.py           # AbuseIPDB API integration + caching
-├── decision_engine.py      # Rule-based risk scoring + decision logic
-├── audit_log.py            # Tamper-evident audit trail with hash-chaining
-├── responder.py            # Netmiko device integration + lab allow-list validation
-├── config.yaml             # Centralized thresholds & approval rules
-├── .env.example            # Environment variables template
-├── requirements.txt        # Python dependencies
-├── tests.py                # Unit tests for enrichment, decision, API endpoints
-└── README.md               # This file
+```text
+Authenticated detection
+        │
+        ▼
+Persist event ──► audit: detect
+        │
+        ▼
+Enrich source IP ──► audit: enrich
+        │
+        ▼
+Score risk + explain decision ──► audit: decide
+        │
+        ├── approval required ──► operator approve/reject
+        │
+        └── automatic approval
+                    │
+                    ▼
+           simulate/apply/skip response
+                    │
+                    ▼
+               audit: respond
 ```
 
----
+The default decision score is:
 
-## Installation & Setup
+```text
+risk = 100 × (
+    abuse reputation × 0.40
+  + normalized severity × 0.35
+  + normalized report count × 0.25
+)
+```
 
-### 1. Clone and Install Dependencies
+Default actions are `block` at 75 or above, `monitor` at 50–74.9, and `ignore` below 50. Approval safety rules are evaluated before action-specific automatic approval.
+
+## Requirements
+
+- Python 3.12
+- An AbuseIPDB API key for live reputation enrichment
+- A supported lab device only when enabling real responses:
+  - Cisco IOS
+  - Juniper Junos
+
+## Quick start
 
 ```bash
-git clone https://github.com/FlickShoW001/test.git
-cd test
-git checkout soar-platform
+git clone https://github.com/FlickShoW001/SOAR.git
+cd SOAR
 
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
+python3.12 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-```
 
-### 2. Configure Environment
-
-```bash
 cp .env.example .env
-# Edit .env with your settings:
-#   - ABUSEIPDB_API_KEY: Get from https://www.abuseipdb.com/register
-#   - LAB_DEVICE_IP, LAB_DEVICE_USERNAME, LAB_DEVICE_PASSWORD: Your lab firewall
-#   - LAB_ALLOWED_IPS: CIDR blocks to protect (e.g., 192.168.1.0/24)
 ```
 
-### 3. Load Configuration
+Set secure local credentials and an unpredictable session secret in `.env`:
+
+```dotenv
+SOAR_ADMIN_USERNAME=admin
+SOAR_ADMIN_PASSWORD=use-a-unique-strong-password
+SOAR_SESSION_SECRET=replace-with-a-long-random-value
+ABUSEIPDB_API_KEY=your-abuseipdb-key
+```
+
+Generate a suitable session secret:
 
 ```bash
-# config.yaml defines all thresholds—edit to customize:
-#   - risk_score_weights: How much each factor contributes to risk
-#   - action_thresholds: At what risk_score to recommend block/monitor/ignore
-#   - approval_rules: Which decisions require human approval
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-### 4. Run the Application
+Start the application:
 
 ```bash
-python main.py
-# Or use uvicorn directly:
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-The API starts at `http://localhost:8000`.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Interactive API documentation is available at `/docs`.
 
----
+> [!WARNING]
+> Without environment overrides, the application falls back to example administrator credentials and an ephemeral session secret. Startup warnings identify both conditions. They are convenient for a local lab but unsafe for a shared or deployed environment.
 
-## API Endpoints
+## Authentication and roles
 
-### Detection Intake
+The browser uses a signed, HTTP-only, `SameSite=Strict` session cookie. API clients can authenticate with HTTP Basic credentials. Set `SOAR_SESSION_COOKIE_SECURE=true` whenever the application is served over HTTPS.
 
-**POST `/detections`** — Ingest a security event
+| Capability | Admin | Operator | Viewer |
+| --- | :---: | :---: | :---: |
+| View dashboard, events, and audit data | Yes | Yes | Yes |
+| Submit detections | Yes | Yes | No |
+| Approve or reject decisions | Yes | Yes | No |
 
-```json
-{
-  "source_ip": "192.168.1.100",
-  "event_type": "port_scan",
-  "severity": 4,
-  "raw_log_line": "SYN scan from 192.168.1.100 to ports 22,80,443",
-  "timestamp": "2026-08-19T10:00:00Z"
-}
+Additional users can be configured with JSON:
+
+```dotenv
+SOAR_USERS_JSON={"operator":{"password":"replace-me","role":"operator"},"analyst":{"password":"replace-me","role":"viewer"}}
 ```
 
-Response (auto-approved low-risk):
-```json
-{
-  "id": 1,
-  "source_ip": "192.168.1.100",
-  "status": "responded",
-  "message": "Auto-approved and responded",
-  "response": {
-    "status": "simulation",
-    "commands_sent": ["...", "..."]
-  }
-}
+Malformed user records are ignored, and malformed top-level JSON fails closed to the built-in administrator only. Restart the application after changing account configuration.
+
+## API overview
+
+| Method | Route | Access | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/login` | Public | Render secure browser sign-in |
+| `POST` | `/login` | Public | Create a signed browser session |
+| `POST` | `/logout` | Public | Clear the browser session |
+| `GET` | `/` | Browser session | Render the operations console |
+| `GET` | `/dashboard/data` | Viewer+ | Return live dashboard data with ETag support |
+| `POST` | `/detections` | Operator+ | Run the detection pipeline |
+| `POST` | `/approvals/{event_id}` | Operator+ | Approve or reject one pending decision |
+| `GET` | `/events/{event_id}` | Viewer+ | Return event, enrichment, decision, approval, and audit context |
+| `GET` | `/health` | Public | Verify database connectivity and recent audit integrity |
+
+### Submit a detection
+
+```bash
+curl -u admin:use-a-unique-strong-password \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_ip": "192.168.1.100",
+    "event_type": "port_scan",
+    "severity": 4,
+    "raw_log_line": "SYN scan from 192.168.1.100",
+    "timestamp": "2026-08-24T10:00:00Z"
+  }' \
+  http://127.0.0.1:8000/detections
 ```
 
-Response (requires approval):
-```json
-{
-  "id": 2,
-  "source_ip": "192.168.1.101",
-  "status": "pending_approval",
-  "message": "Awaiting human approval",
-  "decision": {
-    "action": "block",
-    "risk_score": 82.5,
-    "confidence": 0.92
-  }
-}
+Validation rules:
+
+- `source_ip` must be a valid IPv4 or IPv6 address.
+- `event_type` must contain 1–50 non-whitespace characters.
+- `severity` must be an integer from 1 through 5.
+- `raw_log_line` must contain evidence and cannot exceed 10,000 characters.
+- `timestamp`, when present, must include a timezone offset.
+
+### Review a decision
+
+```bash
+# Approve
+curl -u admin:use-a-unique-strong-password \
+  -H "Content-Type: application/json" \
+  -d '{"approved":true}' \
+  http://127.0.0.1:8000/approvals/42
+
+# Reject — a meaningful reason is required
+curl -u admin:use-a-unique-strong-password \
+  -H "Content-Type: application/json" \
+  -d '{"approved":false,"rejected_reason":"Known cyber-range scanner"}' \
+  http://127.0.0.1:8000/approvals/42
 ```
 
-### Approval Gate
+Only `pending_approval` events can be claimed. Concurrent or repeated review attempts receive `409 Conflict`.
 
-**POST `/approvals/{event_id}`** — Approve or reject pending decision
+## Event lifecycle
 
-```json
-{
-  "approved": true,
-  "rejected_reason": null
-}
+```text
+new → enriched → decided
+                    ├─→ pending_approval → rejected
+                    └─→ responding
+                              ├─→ responded
+                              ├─→ closed
+                              └─→ response_failed
+
+Any unexpected processing exception after persistence:
+processing_failed + pipeline_error audit entry
 ```
 
-Or reject:
-```json
-{
-  "approved": false,
-  "rejected_reason": "This is a known security researcher; ignore"
-}
+- `responded`: the block was simulated or applied successfully.
+- `closed`: the decision did not require a network block.
+- `response_failed`: the responder rejected or failed the operation.
+- `processing_failed`: an earlier enrichment/decision pipeline stage failed after the event had been persisted.
+- `rejected`: an operator declined the automated decision.
+
+## Response safety
+
+The connector only generates device commands for `block` decisions. It also requires:
+
+1. An atomically claimed `responding` event.
+2. A source IP inside `LAB_ALLOWED_IPS`.
+3. A supported device type.
+4. Complete device credentials for live execution.
+5. Both `responder.dry_run` and `responder.simulation_mode` set to the YAML boolean `false`.
+6. A lab device IP that is also inside the allow-list.
+
+IPv6 detection intake is supported, but the current network response connector is IPv4-only and fails closed for IPv6 targets.
+
+## Audit integrity
+
+Each audit hash covers the UTC timestamp, event ID, actor, action, before/after state, reasoning, and previous entry hash. Verification detects modified content, broken links, event reassignment, entry deletion/reordering, and chain-head truncation.
+
+The local chain head is stored in `audit_anchor`. For stronger truncation evidence, place an additional anchor on separately protected durable storage:
+
+```dotenv
+AUDIT_EXTERNAL_ANCHOR_PATH=/mnt/audit-anchor/soar-audit-head.json
 ```
 
-### Dashboard & Reporting
+Hash chaining is tamper-evident, not immutable storage. Protect the database and external anchor with access controls, backups, and independent monitoring.
 
-**GET `/`** — Render dashboard (HTML)
-- Shows pending approvals, recent decisions, audit log
-- Displays audit chain integrity status
+## Configuration
 
-**GET `/events/{event_id}`** — Retrieve full event details
-- Event info, enrichment, decision, approval, audit trail
+`config.yaml` controls risk weights, action thresholds, approval rules, and responder safety modes. Environment variables control secrets, identity, database location, enrichment, device access, and process settings.
 
-**GET `/health`** — Health check
-```json
-{
-  "status": "healthy",
-  "database": "connected",
-  "audit_chain": "valid"
-}
-```
+Important variables:
 
----
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | Project-local SQLite | SQLAlchemy connection URL |
+| `ABUSEIPDB_API_KEY` | None | Reputation service authentication |
+| `ABUSEIPDB_CACHE_TTL_MINUTES` | `60` | Positive process-local cache TTL |
+| `SOAR_ADMIN_USERNAME` | `admin` | Built-in administrator name |
+| `SOAR_ADMIN_PASSWORD` | `admin` | Built-in administrator password |
+| `SOAR_USERS_JSON` | None | Additional role-based accounts |
+| `SOAR_SESSION_SECRET` | Random per process | Session HMAC key |
+| `SOAR_SESSION_TTL_SECONDS` | `28800` | Browser session lifetime |
+| `SOAR_SESSION_COOKIE_SECURE` | `false` | HTTPS-only cookie flag |
+| `LAB_DEVICE_*` | See `.env.example` | Netmiko device configuration |
+| `LAB_ALLOWED_IPS` | Private lab CIDRs | Permitted targets and device networks |
+| `AUDIT_EXTERNAL_ANCHOR_PATH` | None | Optional external chain-head file |
 
-## Configuration (config.yaml)
-
-All thresholds and rules are externalized for safety and auditability:
-
-```yaml
-decision_engine:
-  risk_score_weights:
-    abuse_score: 0.40      # 40% from reputation
-    event_severity: 0.35   # 35% from severity
-    report_count: 0.25     # 25% from frequency
-  
-  action_thresholds:
-    block_min_risk: 75     # Risk >= 75 → recommend BLOCK
-    monitor_min_risk: 50   # Risk >= 50 → recommend MONITOR
-    ignore_min_risk: 0     # Risk >= 0 → recommend IGNORE
-  
-  approval_rules:
-    block_requires_approval: true
-    monitor_auto_approve_max_risk: 45
-    high_severity_requires_approval: true
-    uncached_ip_requires_approval: true
-
-responder:
-  dry_run: true            # CRITICAL: Set to false only after lab testing
-  simulation_mode: true    # Log what would be sent
-```
-
----
-
-## Security & Non-Negotiable Constraints
-
-✅ **No hardcoded secrets**: All credentials from `.env` file (`.env.example` provided)  
-✅ **No real device execution without approval**: Approval gate enforces human review  
-✅ **Lab IP allow-list validation**: Prevents accidental targeting of non-lab networks  
-✅ **Dry-run/simulation mode**: Safe testing before enabling real device connections  
-✅ **Tamper-evident audit trail**: Hash-chain detects any audit log modifications  
-✅ **Explainable decisions**: Detailed reasoning logged for every decision  
-✅ **Configurable thresholds**: No magic numbers inline; edit `config.yaml`  
-✅ **Unit tests included**: Test enrichment, decision logic, API endpoints  
-
----
+Relative SQLite paths are resolved against the project directory rather than the launch directory.
 
 ## Testing
 
-Run the unit test suite:
-
 ```bash
-pytest tests.py -v
+pytest -q
 ```
 
-Tests cover:
-- Enrichment: API key validation, caching, error handling
-- Decision Engine: High/medium/low-risk scoring, approval rules
-- Audit Log: Hash-chain integrity
-- API Endpoints: Detection intake, approval gate, health check, dashboard
+The regression suite covers:
 
----
+- Detection and rejection validation
+- User configuration and session parsing
+- Login page security headers and cache policy
+- Username preservation after a failed sign-in
+- Authenticated dashboard ETag revalidation
+- Persistent and audited pipeline failure states
 
-## Workflow Example
+JavaScript syntax can be checked with Node.js:
 
-### Scenario: Port scan detected from malicious IP
+```bash
+node --check static/dashboard.js
+node --check static/login.js
+```
 
-1. **Detection** → POST `/detections` with source IP `192.168.1.100`
-   - Event stored in DB with status "new"
-   - Audit entry: "detect" action logged
+## Project structure
 
-2. **Enrichment** → AbuseIPDB API called
-   - IP has abuse_score=85, report_count=150
-   - Audit entry: "enrich" action logged with results
+```text
+.
+├── main.py                    FastAPI application, auth, routes, and pipeline
+├── models.py                  SQLAlchemy data model and database initialization
+├── enrichment.py              AbuseIPDB integration and in-memory cache
+├── decision_engine.py         Risk scoring and approval rules
+├── responder.py               Network-device response connector
+├── audit_log.py               Tamper-evident audit chain
+├── config.yaml                Decision and response configuration
+├── templates/                 Jinja login and command-center views
+├── static/                    Responsive CSS and browser behavior
+├── tests/                     Focused regression tests
+├── docs/                      Architecture, operations, and security guides
+├── DEPLOYMENT.md              Deployment checklist
+├── .env.example               Environment configuration template
+└── requirements.txt           Python dependencies
+```
 
-3. **Decision** → Risk scoring applied
-   - risk_score = (0.85 × 0.40) + (0.8 × 0.35) + (min(150/200, 1) × 0.25) × 100 ≈ **82.5**
-   - action="block", confidence=0.92, requires_approval=true
-   - Audit entry: "decide" action logged with reasoning
+## Documentation
 
-4. **Approval Gate** → Event status = "pending_approval"
-   - Dashboard shows pending item
-   - Human operator reviews and calls POST `/approvals/1?approved=true`
-   - Audit entry: "approve" action logged with operator name
+- [Architecture](docs/ARCHITECTURE.md) — components, data model, pipeline, and design decisions
+- [Operations guide](docs/OPERATIONS.md) — configuration, workflows, monitoring, recovery, and troubleshooting
+- [Security guide](docs/SECURITY.md) — trust boundaries, controls, deployment hardening, and limitations
+- [Deployment guide](DEPLOYMENT.md) — repeatable lab deployment checklist
 
-5. **Response** → Netmiko connects to lab router
-   - ACL rules generated for blocking 192.168.1.100
-   - Commands sent in simulation mode (dry_run=true): logged only
-   - Event status = "responded"
-   - Audit entry: "respond" action logged
+## Known limitations
 
-6. **Audit Verification** → Chain integrity confirmed
-   - Dashboard shows ✓ VALID
-   - Any tampering detected by verify_audit_chain()
-
----
-
-## Troubleshooting
-
-### "ABUSEIPDB_API_KEY not set"
-- Set the environment variable: `export ABUSEIPDB_API_KEY=your_key_here`
-- Or add to `.env` file
-
-### "429 rate limited by AbuseIPDB"
-- Increase `cache_ttl_minutes` in `config.yaml`
-- AbuseIPDB free tier: ~10 requests per day
-
-### "Target IP not in lab allow-list"
-- Add the IP/CIDR to `LAB_ALLOWED_IPS` in `.env`
-- Example: `LAB_ALLOWED_IPS=192.168.1.0/24,10.0.0.0/8`
-
-### Audit chain broken
-- Check if audit log was modified directly in database
-- Run `verify_audit_chain()` to find tampered entries
-- Restore from backup or investigate security incident
-
----
-
-## Future Enhancements
-
-- Support multiple enrichment sources (VirusTotal, AlienVault OTX, etc.)
-- Async background processing for enrichment/response
-- Database migration with Alembic
-- Web UI with user authentication & RBAC
-- Incident response playbooks (auto-chain multiple actions)
-- Webhook notifications (Slack, Teams, email)
-- Custom threat intelligence feeds
-- Log file tailing as event source (alternative to POST endpoint)
-
----
+- Enrichment and device response are synchronous request-path operations.
+- The cache is process-local and is not shared across workers or restarts.
+- SQLite is appropriate for a single-process lab, not horizontal production scaling.
+- There is no background job queue, retry scheduler, migration framework, or identity-provider integration.
+- Several commented configuration sections are forward-looking and are not yet consumed by the runtime.
+- Real device changes require environment-specific command validation and rollback planning.
 
 ## License
 
-This is a graduation project for Cybersecurity Diploma studies. Customize freely for your lab environment.
-
----
-
-## Author
-
-*'Mahmoud Ali** — Built for practical security automation & orchestration learning.
-
-For questions or improvements, create an issue or pull request.
+No explicit license file is included. Obtain the repository owner's permission before reuse or redistribution where required.

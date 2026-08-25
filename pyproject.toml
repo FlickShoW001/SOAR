@@ -12,3 +12,4 @@ ignore = [
 
 [tool.pytest.ini_options]
 norecursedirs = ["venv", "SOAR"]
+python_files = ["test_*.py", "tests.py"]

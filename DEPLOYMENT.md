@@ -1,234 +1,130 @@
-"""
-SOAR Platform - Deployment & Quick Start Guide
+# Deployment Guide
 
-This document provides immediate next steps to run the fully-built SOAR platform.
-"""
+This guide describes a controlled, single-instance lab deployment. The current architecture is not a production reference deployment.
 
-## Files Created in soar-platform Branch
-
-1. **main.py** - FastAPI application with full detect→enrich→decide→approve→respond→log pipeline
-2. **models.py** - SQLAlchemy database models (Event, EnrichmentResult, Decision, Approval, AuditLog)
-3. **enrichment.py** - AbuseIPDB API integration with caching & error handling
-4. **decision_engine.py** - Rule-based risk scoring with explainable decisions
-5. **audit_log.py** - Tamper-evident audit trail with SHA256 hash-chaining
-6. **responder.py** - Netmiko integration for firewall/router rule deployment
-7. **config.yaml** - Centralized thresholds & approval rules (no hardcoded magic numbers)
-8. **.env.example** - Environment variables template (never commit secrets)
-9. **requirements.txt** - Python dependencies (FastAPI, SQLAlchemy, Netmiko, etc.)
-10. **tests.py** - Unit tests for enrichment, decision engine, and API endpoints
-11. **README.md** - Comprehensive documentation with setup, API docs, examples
-
----
-
-## Immediate Setup (5 minutes)
+## 1. Prepare the runtime
 
 ```bash
-# 1. Ensure you're on soar-platform branch
-git checkout soar-platform
-
-# 2. Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# 3. Install dependencies
+python3.12 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
-
-# 4. Copy environment template
 cp .env.example .env
-
-# 5. Edit .env with your settings (CRITICAL: add AbuseIPDB API key)
-#    Obtain free API key from: https://www.abuseipdb.com/register
-nano .env
-
-# 6. Run the application
-python main.py
 ```
 
-Application starts at: **http://localhost:8000**
+## 2. Configure secrets
 
----
+Replace every example credential in `.env`. At minimum:
 
-## API Quick Test
+```dotenv
+SOAR_ADMIN_USERNAME=admin
+SOAR_ADMIN_PASSWORD=<unique-strong-password>
+SOAR_SESSION_SECRET=<long-random-secret>
+ABUSEIPDB_API_KEY=<api-key>
+SOAR_SESSION_COOKIE_SECURE=true
+```
 
-### Send a Detection Event
+Generate the session secret with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+
+For additional accounts, use `SOAR_USERS_JSON`. Use only the roles `admin`, `operator`, and `viewer`.
+
+## 3. Keep responses in simulation
+
+Confirm the following values remain enabled in `config.yaml`:
+
+```yaml
+responder:
+  dry_run: true
+  simulation_mode: true
+```
+
+Configure the lab boundary explicitly:
+
+```dotenv
+LAB_ALLOWED_IPS=192.168.1.0/24,10.0.0.0/8
+LAB_DEVICE_IP=192.168.1.1
+LAB_DEVICE_TYPE=cisco_ios
+LAB_DEVICE_INTERFACE=GigabitEthernet0/0
+```
+
+Do not enable live execution until the generated commands and rollback procedure have been tested on an isolated device.
+
+## 4. Validate the release
 
 ```bash
-curl -X POST http://localhost:8000/detections \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source_ip": "192.168.1.100",
-    "event_type": "port_scan",
-    "severity": 4,
-    "raw_log_line": "SYN scan from 192.168.1.100",
-    "timestamp": "2026-08-19T10:00:00Z"
-  }'
+pytest -q
+python -m compileall -q .
+node --check static/dashboard.js
+node --check static/login.js
 ```
 
-Expected response (if AbuseIPDB key is set):
-- Low-risk IPs: Auto-approved with simulated response
-- High-risk IPs: Awaiting approval via dashboard
-
-### View Dashboard
+Start the application on loopback for initial validation:
 
 ```bash
-open http://localhost:8000
-# Or in browser: http://localhost:8000
+uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-Displays:
-- Pending approvals
-- Recent decisions with risk scores
-- Audit log with hash-chain integrity status
-
-### Approve a Decision
+Verify:
 
 ```bash
-curl -X POST http://localhost:8000/approvals/1 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "approved": true,
-    "rejected_reason": null
-  }'
+curl --fail http://127.0.0.1:8000/health
 ```
 
----
+Then sign in, confirm the audit indicator is verified, submit a synthetic lab detection, and complete an approval in simulation mode.
 
-## Key Features Implemented
+## 5. Place behind TLS
 
-✅ **Detection Intake** (POST /detections)
-   - Accepts JSON events: source_ip, event_type, severity, raw_log_line, timestamp
-   - Persists to SQLite with status="new"
+For any shared environment:
 
-✅ **Enrichment** (enrichment.py)
-   - Queries AbuseIPDB for abuse_score, country, ISP, report_count
-   - In-memory caching (configurable TTL)
-   - Handles timeouts, 429 rate limits, invalid API keys gracefully
+- Terminate TLS at a trusted reverse proxy.
+- Set `SOAR_SESSION_COOKIE_SECURE=true`.
+- Restrict ingress to authorized operator networks.
+- Do not expose the service directly to the public internet.
+- Decide whether `/docs`, `/redoc`, and `/openapi.json` should remain accessible.
+- Forward only the headers required by the application and overwrite untrusted client forwarding headers.
 
-✅ **Decision Engine** (decision_engine.py)
-   - Weighted risk scoring: abuse_score (40%) + severity (35%) + reports (25%)
-   - Explainable reasoning logged
-   - Configurable thresholds in config.yaml (no magic numbers in code)
-   - Actions: BLOCK, MONITOR, IGNORE
+Example process command:
 
-✅ **Approval Gate** (main.py)
-   - Blocks high-impact decisions (BLOCK actions) until human approval
-   - Clear approval rules in config.yaml
-   - Low-risk actions auto-approve
-   - POST /approvals/{event_id} endpoint to approve/reject
-
-✅ **Response Connector** (responder.py)
-   - Netmiko integration for Cisco IOS & Juniper JunOS
-   - Lab IP allow-list validation (prevents mistakes)
-   - Dry-run & simulation mode (safe testing)
-   - Device credentials from .env only
-
-✅ **Audit Trail** (audit_log.py)
-   - Hash-chaining: each entry includes SHA256 of previous
-   - Detects tampering via verify_audit_chain()
-   - Tracks all pipeline stages: detect, enrich, decide, approve, reject, respond, close
-
-✅ **Dashboard** (main.py)
-   - Real-time HTML dashboard at GET /
-   - Shows pending approvals, decisions, audit log
-   - Audit chain integrity indicator
-
-✅ **Storage** (models.py)
-   - SQLite via SQLAlchemy (persistent, not in-memory)
-   - 5 models: Event, EnrichmentResult, Decision, Approval, AuditLog
-
-✅ **Tests** (tests.py)
-   - Enrichment: API key validation, caching, error handling
-   - Decision Engine: High/medium/low-risk scenarios, approval rules
-   - Audit Log: Hash-chain integrity
-   - API: Detection intake, approvals, health check
-
----
-
-## Configuration Management
-
-Edit **config.yaml** to customize without redeployment:
-
-### Risk Scoring Weights
-```yaml
-risk_score_weights:
-  abuse_score: 0.40    # IP reputation importance
-  event_severity: 0.35 # Raw event severity importance
-  report_count: 0.25   # Historical reports importance
+```bash
+uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-### Action Thresholds
-```yaml
-action_thresholds:
-  block_min_risk: 75     # >= 75 → recommend BLOCK
-  monitor_min_risk: 50   # >= 50 → recommend MONITOR
-  ignore_min_risk: 0     # >= 0 → recommend IGNORE
-```
+Use one worker with the current SQLite and process-local cache design. Move to a production database and shared cache before scaling horizontally.
 
-### Approval Rules
-```yaml
-approval_rules:
-  block_requires_approval: true                  # All BLOCKs need approval
-  monitor_auto_approve_max_risk: 45              # MONITOR auto-approves if risk < 45
-  high_severity_requires_approval: true          # Critical events always need approval
-  uncached_ip_requires_approval: true            # Unknown IPs require approval
-```
+## 6. Protect persistent state
 
----
+- Store the database on durable, access-controlled storage.
+- Back up `soar.db` on a tested schedule.
+- Configure `AUDIT_EXTERNAL_ANCHOR_PATH` on a separately protected mount.
+- Restrict `.env` to the service account.
+- Keep device credentials in a secret manager when available.
+- Retain application and reverse-proxy logs according to policy.
 
-## Security Checklist
+## 7. Pre-live response checklist
 
-Before deploying to production:
+Before setting both responder flags to `false`:
 
-- [ ] Set ABUSEIPDB_API_KEY in .env (never commit)
-- [ ] Configure LAB_DEVICE_IP/USERNAME/PASSWORD in .env
-- [ ] Define LAB_ALLOWED_IPS in .env (protects non-lab networks)
-- [ ] Set responder.dry_run=false only AFTER lab testing
-- [ ] Run pytest tests.py to verify all modules
-- [ ] Review config.yaml thresholds for your security posture
-- [ ] Keep .env in .gitignore (never commit secrets)
-- [ ] Regular audit chain verification: verify_audit_chain(db)
+- [ ] Lab allow-list contains only approved ranges.
+- [ ] Device IP is inside the allow-list.
+- [ ] Interface name is correct.
+- [ ] Device type is supported.
+- [ ] Generated rules preserve permitted traffic.
+- [ ] Junos commit behavior is validated where applicable.
+- [ ] A rollback command and responsible operator are documented.
+- [ ] Approval permissions are assigned to named users.
+- [ ] Simulation evidence has been reviewed.
+- [ ] Change authorization has been obtained.
 
----
+## Rollback
 
-## Troubleshooting
+If an application release fails:
 
-**"ABUSEIPDB_API_KEY not set"**
-→ Sign up at https://www.abuseipdb.com/register and add key to .env
+1. Stop the new process.
+2. Restore the last known-good code and dependency environment.
+3. Restore the database only if schema or data integrity requires it; preserve forensic copies first.
+4. Verify `/health` and the audit chain.
+5. Keep network response in simulation until the incident is understood.
 
-**"429 rate limited by AbuseIPDB"**
-→ Free tier has ~10 requests/day. Increase cache_ttl_minutes in config.yaml
+Network-device rollback is environment-specific and must be prepared before live response is enabled.
 
-**"Target IP not in lab allow-list"**
-→ Add CIDR to LAB_ALLOWED_IPS in .env (e.g., 192.168.1.0/24,10.0.0.0/8)
-
-**"Audit chain broken"**
-→ Run verify_audit_chain() to detect tampering. Investigate root cause.
-
-**Tests failing**
-→ Run `pytest tests.py -v` to see detailed errors. Check .env is configured.
-
----
-
-## Next Steps
-
-1. **Deploy to lab**: Set responder.dry_run=false in config.yaml after validation
-2. **Add webhook notifications**: Integrate with Slack/Teams/email for approvals
-3. **Custom playbooks**: Extend decision_engine with industry-specific rules
-4. **Log tailing**: Implement file watcher for event_intake alternative to POST endpoint
-5. **Multi-factor enrichment**: Add VirusTotal, AlienVault OTX, custom feeds
-6. **Database migration**: Use Alembic for schema versioning
-7. **Authentication**: Add user login & RBAC to approval gate
-8. **Scalability**: Move to PostgreSQL, async processing, message queue
-
----
-
-## Support
-
-For questions or issues:
-- Check README.md for detailed API documentation
-- Review config.yaml comments explaining thresholds
-- Run tests with pytest tests.py -v
-- Inspect audit logs via GET /events/{event_id}
-
-Built with ❤️ for Cybersecurity Diploma graduation project.
-"""
+See [Operations](docs/OPERATIONS.md) and [Security](docs/SECURITY.md) for monitoring and hardening guidance.

@@ -118,8 +118,13 @@ def execute_response(
             "message": f"Target IP {event.source_ip} not in lab allow-list",
         }
 
-    # Generate commands
-    commands = _generate_block_commands(event.source_ip)
+    # Generate commands. Unknown device types fail closed rather than reporting
+    # a successful simulation for a comment that cannot block anything.
+    try:
+        commands = _generate_block_commands(event.source_ip)
+    except ValueError as exc:
+        logger.error("Cannot generate a safe response: %s", exc)
+        return {"status": "failed", "message": "Unsupported lab device type"}
 
     if dry_run or simulation_mode:
         logger.info(f"[SIMULATION] Would execute on {event.source_ip}:")
@@ -166,6 +171,8 @@ def execute_response(
 
         # Send commands
         output = handler.send_config_set(commands)
+        if device_type == "juniper_junos":
+            output = f"{output}\n{handler.commit()}"
 
         logger.info(f"Successfully pushed block rules for {event.source_ip}")
         return {
@@ -205,26 +212,28 @@ def _generate_block_commands(source_ip: str) -> list[str]:
     device_type = os.getenv("LAB_DEVICE_TYPE", "cisco_ios")
 
     if device_type == "cisco_ios":
+        interface_name = os.getenv(
+            "LAB_DEVICE_INTERFACE", "GigabitEthernet0/0"
+        )
         return [
             "ip access-list extended SOAR_BLOCK",
-            f"no deny ip host {source_ip} any",
             f"deny ip host {source_ip} any",
+            "permit ip any any",
             "exit",
-            "interface GigabitEthernet0/0",
+            f"interface {interface_name}",
             "ip access-group SOAR_BLOCK in",
             "exit",
         ]
 
     elif device_type == "juniper_junos":
+        interface_name = os.getenv("LAB_DEVICE_INTERFACE", "ge-0/0/0")
+        term_name = f"BLOCK_{source_ip.replace('.', '_')}"
         return [
-            "configure",
-            f"set firewall filter BLOCK_LIST from destination-address {source_ip}/32",
-            "set firewall filter BLOCK_LIST then discard",
-            "exit",
-            "commit",
+            f"set firewall family inet filter BLOCK_LIST term {term_name} "
+            f"from source-address {source_ip}/32",
+            f"set firewall family inet filter BLOCK_LIST term {term_name} then discard",
+            f"set interfaces {interface_name} unit 0 family inet filter input BLOCK_LIST",
         ]
 
     else:
-        # Generic fallback
-        logger.warning(f"Unknown device type {device_type}; using generic commands")
-        return [f"# Block {source_ip}"]
+        raise ValueError(f"Unsupported device type: {device_type}")

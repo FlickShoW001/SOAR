@@ -4,13 +4,16 @@ Exposes REST endpoints for detection intake, approvals, and dashboard.
 """
 
 import base64
+import binascii
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import os
 import secrets
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,9 +31,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import APIKeyCookie, HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, IPvAnyAddress, field_validator
+from pydantic import BaseModel, Field, IPvAnyAddress, field_validator, model_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from starlette.datastructures import MutableHeaders
 
 from audit_log import (
     audit_approval,
@@ -38,6 +42,7 @@ from audit_log import (
     audit_enrichment,
     audit_event_detection,
     audit_response,
+    create_audit_entry,
     get_audit_log_for_event,
     verify_audit_chain,
 )
@@ -111,7 +116,12 @@ def _load_users() -> dict[str, dict[str, str]]:
         return users
     try:
         configured = json.loads(raw_users)
+        if not isinstance(configured, dict):
+            raise ValueError("SOAR_USERS_JSON must contain an object")
         for username, record in configured.items():
+            if not isinstance(record, dict):
+                logger.warning("Ignoring malformed SOAR user record for %s", username)
+                continue
             role = record.get("role")
             password = record.get("password")
             if username and password and role in VALID_ROLES:
@@ -128,19 +138,115 @@ DATABASE_URL = _database_url()
 engine, SessionLocal = init_db(DATABASE_URL)
 
 # Load configuration files
-load_decision_config(str(BASE_DIR / "config.yaml"))
+PLATFORM_CONFIG = load_decision_config(str(BASE_DIR / "config.yaml"))
+RESPONDER_CONFIG = PLATFORM_CONFIG.get("responder", {})
+# Only explicit YAML booleans can disable either safety layer. Misspelled or
+# string values therefore remain in simulation rather than enabling a device.
+RESPONDER_DRY_RUN = RESPONDER_CONFIG.get("dry_run", True) is not False
+RESPONDER_SIMULATION_MODE = (
+    RESPONDER_CONFIG.get("simulation_mode", True) is not False
+)
 init_lab_allowlist()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Log application lifecycle events and release process-local state."""
+    logger.info("SOAR Platform starting up...")
+    logger.info(f"Database: {DATABASE_URL}")
+    logger.info("Config loaded: config.yaml")
+    logger.info("Lab allow-list initialized")
+    if ADMIN_PASSWORD in {"admin", "change_this_password", "change_me"}:
+        logger.warning(
+            "Dashboard is using an example administrator password; "
+            "set a unique SOAR_ADMIN_PASSWORD before deployment"
+        )
+    if not SESSION_SECRET_CONFIGURED:
+        logger.warning(
+            "SOAR_SESSION_SECRET is not configured; browser sessions will reset "
+            "when the application restarts"
+        )
+    elif SESSION_SECRET in {
+        "replace_with_a_long_random_secret",
+        "change_me",
+        "changeme",
+    }:
+        logger.warning(
+            "SOAR_SESSION_SECRET is still an example value; replace it with a "
+            "long random secret before deployment"
+        )
+    try:
+        yield
+    finally:
+        logger.info("SOAR Platform shutting down...")
+        clear_enrichment_cache()
+
 
 # FastAPI app
 app = FastAPI(
     title="SOAR Platform",
     description="Security Orchestration, Automation, and Response platform",
     version="1.0.0",
+    lifespan=lifespan,
 )
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+class SecurityHeadersMiddleware:
+    """Add browser security headers without buffering response bodies."""
+
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.setdefault("X-Content-Type-Options", "nosniff")
+                headers.setdefault("X-Frame-Options", "DENY")
+                headers.setdefault("Referrer-Policy", "no-referrer")
+                headers.setdefault(
+                    "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+                )
+                headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+                if scope.get("path") in {"/", "/login"}:
+                    headers.setdefault("Cache-Control", "no-store")
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 app.mount(
     "/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static"
 )
+
+
+def _template_response(
+    request: Request,
+    name: str,
+    context: dict,
+    status_code: int = 200,
+):
+    """Render templates across the old and new Starlette call signatures."""
+    template_context = {"request": request, **context}
+    parameters = inspect.signature(templates.TemplateResponse).parameters
+    if "request" in parameters:
+        return templates.TemplateResponse(
+            request=request,
+            name=name,
+            context=template_context,
+            status_code=status_code,
+        )
+    return templates.TemplateResponse(
+        name,
+        template_context,
+        status_code=status_code,
+    )
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -201,7 +307,14 @@ def _read_session_token(token: str | None) -> UserIdentity | None:
         if int(payload["expires"]) < int(time.time()):
             return None
         username = str(payload["username"])
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+    except (
+        ValueError,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        binascii.Error,
+        json.JSONDecodeError,
+    ):
         return None
     record = AUTH_USERS.get(username)
     return UserIdentity(username, record["role"]) if record else None
@@ -269,6 +382,17 @@ def _isoformat_utc(value: datetime) -> str:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+
+def _parse_decision_reasoning(value: str | None) -> dict:
+    """Return stored decision reasoning without exposing malformed JSON errors."""
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
 # ============================================================================
 # Pydantic Models (Request/Response)
 # ============================================================================
@@ -283,6 +407,22 @@ class DetectionRequest(BaseModel):
     raw_log_line: str = Field(min_length=1, max_length=10_000)
     timestamp: datetime | None = None
 
+    @field_validator("event_type", mode="before")
+    @classmethod
+    def normalize_event_type(cls, value):
+        if isinstance(value, str):
+            value = value.strip()
+        if not value:
+            raise ValueError("event_type must contain non-whitespace characters")
+        return value
+
+    @field_validator("raw_log_line")
+    @classmethod
+    def raw_log_must_not_be_blank(cls, value: str):
+        if not value.strip():
+            raise ValueError("raw_log_line must contain non-whitespace characters")
+        return value
+
     @field_validator("timestamp")
     @classmethod
     def timestamp_must_include_timezone(cls, value: datetime | None):
@@ -296,6 +436,20 @@ class ApprovalRequest(BaseModel):
 
     approved: bool
     rejected_reason: str | None = Field(default=None, max_length=2_000)
+
+    @field_validator("rejected_reason")
+    @classmethod
+    def normalize_rejected_reason(cls, value: str | None):
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @model_validator(mode="after")
+    def rejection_requires_reason(self):
+        if not self.approved and not self.rejected_reason:
+            raise ValueError("rejected_reason is required when rejecting a decision")
+        return self
 
 
 class EventResponse(BaseModel):
@@ -359,6 +513,7 @@ def post_detection(
       3. Trigger enrichment in the background
       4. Return event details
     """
+    event_id = None
     try:
         # Step 1: Create event
         ts = req.timestamp or datetime.now(timezone.utc)
@@ -372,6 +527,7 @@ def post_detection(
         )
         db.add(event)
         db.flush()  # Get the ID
+        event_id = event.id
 
         # Step 2: Audit detection
         audit_event_detection(event, db, actor=current_user.username)
@@ -429,7 +585,12 @@ def post_detection(
             # Execute response
             event.status = "responding"
             db.commit()
-            resp_result = execute_response(event, decision)
+            resp_result = execute_response(
+                event,
+                decision,
+                dry_run=RESPONDER_DRY_RUN,
+                simulation_mode=RESPONDER_SIMULATION_MODE,
+            )
             event_status, response_message = apply_response_result(event, resp_result)
             db.commit()
             audit_response(
@@ -447,6 +608,27 @@ def post_detection(
     except Exception as exc:
         db.rollback()
         logger.exception("Detection intake error")
+        if event_id is not None:
+            try:
+                failed_event = db.get(Event, event_id)
+                if failed_event is not None:
+                    before_status = failed_event.status
+                    failed_event.status = "processing_failed"
+                    db.commit()
+                    create_audit_entry(
+                        event_id=event_id,
+                        actor=current_user.username,
+                        action="pipeline_error",
+                        before_state={"status": before_status},
+                        after_state={"status": "processing_failed"},
+                        reasoning="Detection pipeline failed during processing",
+                        session=db,
+                    )
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Failed to persist the processing failure for event %s", event_id
+                )
         raise HTTPException(
             status_code=500, detail="Detection processing failed"
         ) from exc
@@ -479,25 +661,26 @@ def approve_decision(
                 status_code=409,
                 detail="Event has no decision available for review",
             )
-        approval = db.query(Approval).filter_by(event_id=event_id).first()
+        target_status = "responding" if req.approved else "rejected"
+        claimed = (
+            db.query(Event)
+            .filter(Event.id == event_id, Event.status == "pending_approval")
+            .update({Event.status: target_status}, synchronize_session=False)
+        )
+        if claimed != 1:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Event was already reviewed")
 
-        if not approval:
+        # Create the unique approval row only after winning the atomic event
+        # claim. Creating it before the UPDATE lets concurrent reviewers race
+        # on the unique constraint and turns a normal conflict into a 500.
+        approval = db.query(Approval).filter_by(event_id=event_id).first()
+        if approval is None:
             approval = Approval(event_id=event_id, decision_id=decision.id)
             db.add(approval)
-
         approval.approved_by = current_user.username
 
         if req.approved:
-            claimed = (
-                db.query(Event)
-                .filter(Event.id == event_id, Event.status == "pending_approval")
-                .update({Event.status: "responding"}, synchronize_session=False)
-            )
-            if claimed != 1:
-                db.rollback()
-                raise HTTPException(
-                    status_code=409, detail="Event was already reviewed"
-                )
             approval.status = "approved"
             approval.approved_at = datetime.now(timezone.utc)
             db.commit()
@@ -505,7 +688,12 @@ def approve_decision(
             audit_approval(event, approval, db)
 
             # Execute response
-            resp_result = execute_response(event, decision)
+            resp_result = execute_response(
+                event,
+                decision,
+                dry_run=RESPONDER_DRY_RUN,
+                simulation_mode=RESPONDER_SIMULATION_MODE,
+            )
             event_status, response_message = apply_response_result(event, resp_result)
             db.commit()
             audit_response(
@@ -519,16 +707,6 @@ def approve_decision(
                 "response": resp_result,
             }
         else:
-            claimed = (
-                db.query(Event)
-                .filter(Event.id == event_id, Event.status == "pending_approval")
-                .update({Event.status: "rejected"}, synchronize_session=False)
-            )
-            if claimed != 1:
-                db.rollback()
-                raise HTTPException(
-                    status_code=409, detail="Event was already reviewed"
-                )
             approval.status = "rejected"
             approval.rejected_reason = req.rejected_reason or "No reason provided"
             db.commit()
@@ -563,23 +741,24 @@ def login_page(
     """Render the admin login page."""
     if current_user:
         return RedirectResponse(url="/", status_code=303)
-    return templates.TemplateResponse(
-        "login.html",
-        {"request": request, "error": None},
-    )
+    return _template_response(request, "login.html", {"error": None})
 
 
 @app.post("/login", response_class=HTMLResponse, include_in_schema=False)
 def login(
     request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
+    username: str = Form(..., min_length=1, max_length=128),
+    password: str = Form(..., min_length=1, max_length=256),
 ):
     """Validate admin credentials and start a signed browser session."""
     if not _credentials_are_valid(username, password):
-        return templates.TemplateResponse(
+        return _template_response(
+            request,
             "login.html",
-            {"request": request, "error": "Incorrect username or password."},
+            {
+                "error": "Incorrect username or password.",
+                "username": username,
+            },
             status_code=401,
         )
 
@@ -612,10 +791,10 @@ def dashboard(
     """Render the authenticated SOAR command center."""
     if not current_user:
         return RedirectResponse(url="/login", status_code=303)
-    return templates.TemplateResponse(
+    return _template_response(
+        request,
         "dashboard.html",
         {
-            "request": request,
             "current_user": current_user.username,
             "current_role": current_user.role,
         },
@@ -624,6 +803,7 @@ def dashboard(
 
 @app.get("/dashboard/data")
 def dashboard_data(
+    request: Request,
     response: Response,
     current_user: UserIdentity = Depends(require_viewer),
     db: Session = Depends(get_db),
@@ -632,19 +812,59 @@ def dashboard_data(
     response.headers["Cache-Control"] = "no-store"
 
     pending = (
-        db.query(Event)
+        db.query(
+            Event.id,
+            Event.source_ip,
+            Event.event_type,
+            Event.severity,
+            Event.status,
+        )
         .filter_by(status="pending_approval")
         .order_by(Event.id.desc())
         .all()
     )
 
-    recent_events = db.query(Event).order_by(Event.id.desc()).limit(20).all()
+    recent_events = (
+        db.query(
+            Event.id,
+            Event.source_ip,
+            Event.event_type,
+            Event.severity,
+            Event.status,
+            Event.timestamp,
+        )
+        .order_by(Event.id.desc())
+        .limit(20)
+        .all()
+    )
 
-    recent_decisions = db.query(Decision).order_by(Decision.id.desc()).limit(10).all()
+    recent_decisions = (
+        db.query(
+            Decision.event_id,
+            Decision.action,
+            Decision.risk_score,
+            Decision.confidence,
+            Decision.requires_approval,
+        )
+        .order_by(Decision.id.desc())
+        .limit(10)
+        .all()
+    )
 
-    recent_audit = db.query(AuditLog).order_by(AuditLog.id.desc()).limit(20).all()
+    recent_audit = (
+        db.query(
+            AuditLog.timestamp,
+            AuditLog.actor,
+            AuditLog.action,
+            AuditLog.event_id,
+            AuditLog.entry_hash,
+        )
+        .order_by(AuditLog.id.desc())
+        .limit(20)
+        .all()
+    )
 
-    return {
+    payload = {
         "events": [
             {
                 "id": e.id,
@@ -688,6 +908,17 @@ def dashboard_data(
         ],
         "audit_chain_valid": verify_audit_chain(db),
     }
+    payload_fingerprint = hashlib.sha256(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    etag = f'W/"{payload_fingerprint}"'
+    response.headers["ETag"] = etag
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=304,
+            headers={"Cache-Control": "no-store", "ETag": etag},
+        )
+    return payload
 
 
 @app.get("/events/{event_id}")
@@ -714,12 +945,17 @@ def get_event(
             "severity": event.severity,
             "status": event.status,
             "timestamp": _isoformat_utc(event.timestamp),
+            "created_at": _isoformat_utc(event.created_at),
+            "raw_log_line": event.raw_log_line,
         },
         "enrichment": {
             "abuse_score": enrichment.abuse_score if enrichment else None,
             "country": enrichment.country if enrichment else None,
             "isp": enrichment.isp if enrichment else None,
             "report_count": enrichment.report_count if enrichment else None,
+            "is_vpn": enrichment.is_vpn if enrichment else None,
+            "is_proxy": enrichment.is_proxy if enrichment else None,
+            "error": enrichment.error if enrichment else None,
         }
         if enrichment
         else None,
@@ -728,12 +964,19 @@ def get_event(
             "risk_score": decision.risk_score if decision else None,
             "confidence": decision.confidence if decision else None,
             "requires_approval": decision.requires_approval if decision else None,
+            "reasoning": _parse_decision_reasoning(decision.reasoning)
+            if decision
+            else {},
         }
         if decision
         else None,
         "approval": {
             "status": approval.status if approval else None,
             "approved_by": approval.approved_by if approval else None,
+            "rejected_reason": approval.rejected_reason if approval else None,
+            "approved_at": _isoformat_utc(approval.approved_at)
+            if approval and approval.approved_at
+            else None,
         }
         if approval
         else None,
@@ -755,10 +998,19 @@ def health_check(db: Session = Depends(get_db)):
     try:
         db.execute(text("SELECT 1"))
         audit_valid = verify_audit_chain(db, depth=100)
+        if not audit_valid:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unhealthy",
+                    "database": "connected",
+                    "audit_chain": "invalid",
+                },
+            )
         return {
             "status": "healthy",
             "database": "connected",
-            "audit_chain": "valid" if audit_valid else "invalid",
+            "audit_chain": "valid",
         }
     except Exception:
         logger.exception("Health check failed")
@@ -766,35 +1018,6 @@ def health_check(db: Session = Depends(get_db)):
             status_code=503,
             content={"status": "unhealthy", "error": "Health check failed"},
         )
-
-
-# ============================================================================
-# Startup/Shutdown
-# ============================================================================
-
-
-@app.on_event("startup")
-def startup():
-    logger.info("SOAR Platform starting up...")
-    logger.info(f"Database: {DATABASE_URL}")
-    logger.info("Config loaded: config.yaml")
-    logger.info("Lab allow-list initialized")
-    if ADMIN_USERNAME == "admin" and ADMIN_PASSWORD == "admin":
-        logger.warning(
-            "Dashboard is using the default admin/admin credentials; "
-            "set SOAR_ADMIN_USERNAME and SOAR_ADMIN_PASSWORD before deployment"
-        )
-    if not SESSION_SECRET_CONFIGURED:
-        logger.warning(
-            "SOAR_SESSION_SECRET is not configured; browser sessions will reset "
-            "when the application restarts"
-        )
-
-
-@app.on_event("shutdown")
-def shutdown():
-    logger.info("SOAR Platform shutting down...")
-    clear_enrichment_cache()
 
 
 if __name__ == "__main__":

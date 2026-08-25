@@ -3,135 +3,218 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>SOAR Command Center</title>
+  <meta name="theme-color" content="#0b1210">
+  <meta name="description" content="SOAR operations console for detection triage, approvals, response automation, and audit verification.">
+  <title>Operations Overview · SOAR</title>
   <link rel="stylesheet" href="/static/dashboard.css">
   <script src="/static/dashboard.js" defer></script>
 </head>
 <body data-role="{{ current_role }}">
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+
   <div class="app-shell">
     <aside class="sidebar" aria-label="Primary navigation">
-      <a class="brand" href="/" aria-label="SOAR Command Center home">
-        <span class="brand-mark">S</span>
-        <span><strong>SOAR</strong><small>Command Center</small></span>
+      <a class="brand" href="#overview" aria-label="SOAR operations overview">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M16 3 27 9.5v13L16 29 5 22.5v-13L16 3Z"/><circle cx="16" cy="16" r="4"/><path d="M16 8v4m0 8v4m8-8h-4m-8 0H8"/></svg>
+        </span>
+        <span class="brand-copy"><strong>SOAR</strong><small>Operations console</small></span>
       </a>
 
+      <div class="nav-label">Workspace</div>
       <nav class="nav-list">
-        <a class="nav-item active" href="#overview"><span>⌂</span> Overview</a>
-        <a class="nav-item" href="#events"><span>◉</span> Events</a>
-        <a class="nav-item" href="#approvals"><span>✓</span> Approvals</a>
-        <a class="nav-item" href="#decisions"><span>⌁</span> Decisions</a>
-        <a class="nav-item" href="#audit"><span>▤</span> Audit trail</a>
+        <a class="nav-item active" href="#overview" data-section-link="overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg>
+          <span>Overview</span>
+        </a>
+        <a class="nav-item" href="#events" data-section-link="events">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3.8 7.5v9L12 21l8.2-4.5v-9L12 3Z"/><path d="m8.5 12 2.2 2.2 4.8-4.8"/></svg>
+          <span>Event stream</span>
+        </a>
+        <a class="nav-item" href="#approvals" data-section-link="approvals">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6l1 2h3v15H5V6h3l1-2Z"/><path d="m8 14 2.3 2.3L16 10.5"/></svg>
+          <span>Approvals</span>
+          <span class="nav-count" id="nav-pending-count" hidden>0</span>
+        </a>
+        <a class="nav-item" href="#decisions" data-section-link="decisions">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>
+          <span>Decisions</span>
+        </a>
+        <a class="nav-item" href="#audit" data-section-link="audit">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18H6z"/><path d="M9 8h6m-6 4h6m-6 4h4"/></svg>
+          <span>Audit trail</span>
+        </a>
       </nav>
 
-      <div class="sidebar-foot">
-        <span class="pulse-dot" aria-hidden="true"></span>
-        <span><strong>System online</strong><small id="last-sync">Connecting…</small></span>
+      <div class="sidebar-status">
+        <div class="status-orbit" aria-hidden="true"><span></span></div>
+        <div><strong>Platform online</strong><small id="last-sync">Establishing connection</small></div>
       </div>
+      <p class="sidebar-version">SOAR / CONTROL PLANE</p>
     </aside>
 
-    <main class="main-content">
+    <main class="main-content" id="main-content">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Security operations</p>
-          <h1>Command center</h1>
+        <div class="page-heading">
+          <p class="breadcrumb"><span>Command center</span><i>/</i> Operations overview</p>
+          <h1>Security operations</h1>
         </div>
+
         <div class="topbar-actions">
-          <label class="search-box">
-            <span>⌕</span>
-            <input id="global-search" type="search" placeholder="Filter events, IPs, actions…" aria-label="Filter dashboard data">
+          <label class="search-box" for="global-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg>
+            <input id="global-search" type="search" placeholder="Search events, IPs, actions" autocomplete="off">
+            <kbd>/</kbd>
           </label>
-          <div class="operator">
-            <span class="avatar">{{ current_user[0]|upper }}</span>
-            <span><strong>{{ current_user }}</strong><small>{{ current_role|title }}</small></span>
+
+          <div class="operator-menu">
+            <span class="avatar" aria-hidden="true">{{ current_user[0]|upper }}</span>
+            <span class="operator-copy"><strong>{{ current_user }}</strong><small>{{ current_role|title }} access</small></span>
           </div>
+
           <form action="/logout" method="post">
-            <button class="signout-button" type="submit">Sign out</button>
+            <button class="icon-button signout-button" type="submit" aria-label="Sign out" title="Sign out">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H5v14h5m4-3 4-4-4-4m4 4H9"/></svg>
+            </button>
           </form>
         </div>
       </header>
 
-      <section class="hero" id="overview">
-        <div>
-          <span class="live-label"><i></i> Live monitoring</span>
-          <h2>Security posture at a glance</h2>
-          <p>Review automated decisions, approve high-impact actions, and verify every step in the response chain.</p>
+      <section class="overview-hero" id="overview" data-dashboard-section>
+        <div class="hero-copy">
+          <div class="live-label"><span aria-hidden="true"></span> Live operational view</div>
+          <h2>Clarity across every response.</h2>
+          <p>Monitor active detections, review high-impact decisions, and trace every automated action from one controlled workspace.</p>
+          <div class="hero-meta">
+            <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v5c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-3Z"/><path d="m9 12 2 2 4-4"/></svg> Human-governed response</span>
+            <span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/></svg> 5-second synchronization</span>
+          </div>
         </div>
-        <div class="chain-card" id="chain-card">
-          <span class="chain-icon">✓</span>
-          <span><small>Audit integrity</small><strong id="chain-status">Checking…</strong></span>
+
+        <div class="integrity-card" id="chain-card">
+          <div class="integrity-topline">
+            <span class="integrity-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v5c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-3Z"/><path d="m9 12 2 2 4-4"/></svg>
+            </span>
+            <span class="status-chip" id="chain-chip">Verifying</span>
+          </div>
+          <div><small>Audit chain integrity</small><strong id="chain-status">Running verification…</strong></div>
+          <p id="chain-description">Checking the latest tamper-evident records.</p>
         </div>
       </section>
 
-      <section class="metric-grid" aria-label="Current metrics">
-        <article class="metric-card blue">
-          <span class="metric-icon">◉</span>
-          <div><small>Recent events</small><strong id="event-count">—</strong><p>Latest detected activity</p></div>
+      <section class="metric-grid" aria-label="Operational metrics">
+        <article class="metric-card">
+          <div class="metric-heading"><span>Events in view</span><span class="metric-icon blue"><svg viewBox="0 0 24 24"><path d="M12 3 3.8 7.5v9L12 21l8.2-4.5v-9L12 3Z"/><path d="m8.5 12 2.2 2.2 4.8-4.8"/></svg></span></div>
+          <strong id="event-count">—</strong>
+          <p><span class="trend-dot blue"></span> Latest detection window</p>
         </article>
-        <article class="metric-card warning">
-          <span class="metric-icon">!</span>
-          <div><small>Pending approvals</small><strong id="pending-count">—</strong><p>Requires operator review</p></div>
+        <article class="metric-card attention">
+          <div class="metric-heading"><span>Awaiting review</span><span class="metric-icon amber"><svg viewBox="0 0 24 24"><path d="M12 4 3 20h18L12 4Z"/><path d="M12 9v5m0 3h.01"/></svg></span></div>
+          <strong id="pending-count">—</strong>
+          <p><span class="trend-dot amber"></span> Operator action required</p>
         </article>
-        <article class="metric-card blue">
-          <span class="metric-icon">⌁</span>
-          <div><small>Recent decisions</small><strong id="decision-count">—</strong><p>Latest automated outcomes</p></div>
+        <article class="metric-card">
+          <div class="metric-heading"><span>Decisions in view</span><span class="metric-icon violet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg></span></div>
+          <strong id="decision-count">—</strong>
+          <p><span class="trend-dot violet"></span> Explainable outcomes</p>
         </article>
-        <article class="metric-card violet">
-          <span class="metric-icon">▤</span>
-          <div><small>Audit entries</small><strong id="audit-count">—</strong><p>Recent verified records</p></div>
+        <article class="metric-card">
+          <div class="metric-heading"><span>Audit records</span><span class="metric-icon green"><svg viewBox="0 0 24 24"><path d="M6 3h12v18H6z"/><path d="M9 8h6m-6 4h6m-6 4h4"/></svg></span></div>
+          <strong id="audit-count">—</strong>
+          <p><span class="trend-dot green"></span> Latest integrity segment</p>
         </article>
       </section>
 
-      <section class="panel" id="events">
-        <div class="panel-heading">
-          <div><p class="eyebrow">Detection feed</p><h2>Recent events</h2></div>
-          <button class="ghost-button" type="button" data-refresh>Refresh</button>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Event</th><th>Source / time</th><th>Detection type</th><th>Severity</th><th>Status</th></tr></thead>
-            <tbody id="events-body"><tr><td colspan="5" class="empty-state">Loading events…</td></tr></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel priority-panel" id="approvals">
-        <div class="panel-heading">
-          <div><p class="eyebrow">Action required</p><h2>Pending approvals <span class="count-pill" id="pending-pill">0</span></h2></div>
-          <button class="ghost-button" type="button" data-refresh>Refresh</button>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Event</th><th>Source</th><th>Detection type</th><th>Severity</th><th>Status</th><th class="align-right">Actions</th></tr></thead>
-            <tbody id="pending-body"><tr><td colspan="6" class="empty-state">Loading approvals…</td></tr></tbody>
-          </table>
-        </div>
-      </section>
-
-      <div class="content-grid">
-        <section class="panel" id="decisions">
-          <div class="panel-heading"><div><p class="eyebrow">Automation</p><h2>Recent decisions</h2></div></div>
-          <div class="table-wrap compact-table">
+      <section class="workspace-grid">
+        <article class="panel events-panel" id="events" data-dashboard-section>
+          <div class="panel-heading">
+            <div><p class="section-label">Detection stream</p><h2>Recent security events</h2><p>Latest activity entering the response pipeline.</p></div>
+            <button class="secondary-button" type="button" data-refresh>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.6-2L20 9M4 15l2.3 2a7 7 0 0 0 11.6-2"/></svg>
+              Refresh
+            </button>
+          </div>
+          <div class="table-wrap">
             <table>
-              <thead><tr><th>Event</th><th>Action</th><th>Risk</th><th>Confidence</th><th>Approval</th></tr></thead>
-              <tbody id="decisions-body"><tr><td colspan="5" class="empty-state">Loading decisions…</td></tr></tbody>
+              <caption class="sr-only">Recent security events</caption>
+              <thead><tr><th scope="col">Event</th><th scope="col">Source</th><th scope="col">Detection</th><th scope="col">Severity</th><th scope="col">State</th><th scope="col"><span class="sr-only">Open</span></th></tr></thead>
+              <tbody id="events-body"><tr><td colspan="6"><div class="loading-state"><span></span>Loading event stream…</div></td></tr></tbody>
             </table>
           </div>
-        </section>
+          <div class="panel-footer"><span>Showing the 20 most recent events</span><span class="live-sync"><i></i> Auto-refresh active</span></div>
+        </article>
 
-        <section class="panel" id="audit">
-          <div class="panel-heading"><div><p class="eyebrow">Evidence</p><h2>Audit trail</h2></div></div>
-          <div class="timeline" id="audit-list"><p class="empty-state">Loading audit entries…</p></div>
-        </section>
-      </div>
+        <aside class="panel approvals-panel" id="approvals" data-dashboard-section>
+          <div class="panel-heading">
+            <div><p class="section-label amber-text">Review queue</p><h2>Pending approvals <span class="count-pill" id="pending-pill">0</span></h2><p>High-impact actions awaiting a decision.</p></div>
+          </div>
+          <div class="approval-list" id="pending-list"><div class="loading-state"><span></span>Loading review queue…</div></div>
+          <div class="panel-footer"><span id="approval-permission-note">Approve or reject with an audit reason</span></div>
+        </aside>
+      </section>
+
+      <section class="lower-grid">
+        <article class="panel" id="decisions" data-dashboard-section>
+          <div class="panel-heading">
+            <div><p class="section-label">Automation ledger</p><h2>Recent decisions</h2><p>Risk, confidence, and approval requirements.</p></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <caption class="sr-only">Recent automated decisions</caption>
+              <thead><tr><th scope="col">Event</th><th scope="col">Action</th><th scope="col">Risk score</th><th scope="col">Confidence</th><th scope="col">Governance</th></tr></thead>
+              <tbody id="decisions-body"><tr><td colspan="5"><div class="loading-state"><span></span>Loading decisions…</div></td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="panel audit-panel" id="audit" data-dashboard-section>
+          <div class="panel-heading">
+            <div><p class="section-label">Verified evidence</p><h2>Audit activity</h2><p>Latest immutable state transitions.</p></div>
+          </div>
+          <div class="timeline" id="audit-list"><div class="loading-state"><span></span>Loading audit trail…</div></div>
+        </article>
+      </section>
+
+      <footer class="app-footer"><span>SOAR Operations Console</span><span>Controlled lab environment · Simulation-first response</span></footer>
     </main>
   </div>
 
-  <dialog id="event-dialog">
-    <div class="dialog-heading"><div><p class="eyebrow">Event intelligence</p><h2 id="dialog-title">Event details</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="Close event details">×</button></div>
-    <div id="dialog-content" class="dialog-content"></div>
+  <dialog class="modal event-modal" id="event-dialog" aria-labelledby="dialog-title">
+    <div class="modal-heading">
+      <div><p class="section-label">Event intelligence</p><h2 id="dialog-title">Event details</h2></div>
+      <button type="button" class="icon-button" data-close-dialog="event-dialog" aria-label="Close event details">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <div id="dialog-content" class="modal-content"></div>
   </dialog>
 
-  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog class="modal review-modal" id="review-dialog" aria-labelledby="review-title">
+    <form id="review-form" method="dialog">
+      <div class="modal-heading">
+        <div><p class="section-label" id="review-eyebrow">Operator decision</p><h2 id="review-title">Review response</h2></div>
+        <button type="button" class="icon-button" data-close-dialog="review-dialog" aria-label="Close review">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="modal-content">
+        <div class="review-summary" id="review-summary"></div>
+        <label class="reason-field" id="reason-field">
+          <span>Reason for rejection <b>Required</b></span>
+          <textarea id="rejection-reason" maxlength="2000" rows="4" placeholder="Document why this automated decision should not proceed."></textarea>
+          <small><span id="reason-count">0</span> / 2000 characters</small>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary-button" type="button" data-close-dialog="review-dialog">Cancel</button>
+        <button class="primary-button" id="confirm-review" type="submit">Confirm decision</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true">
+    <span class="toast-icon" aria-hidden="true"></span><span id="toast-message"></span>
+  </div>
 </body>
 </html>

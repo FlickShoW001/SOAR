@@ -30,7 +30,8 @@ def utc_now():
 class Event(Base):
     """
     Represents a security event detected by the platform.
-    Status flow: new -> enriched -> decided -> approved -> responded -> closed
+    Status flow includes new, enriched, decided, pending_approval, responding,
+    responded, closed, rejected, response_failed, and processing_failed.
     """
 
     __tablename__ = "events"
@@ -94,7 +95,7 @@ class Decision(Base):
 class Approval(Base):
     """
     Tracks human approval/rejection of decisions.
-    Status: pending -> approved/rejected
+    Status: pending -> approved/rejected, or auto_approved.
     """
 
     __tablename__ = "approvals"
@@ -102,7 +103,9 @@ class Approval(Base):
     id = Column(Integer, primary_key=True, index=True)
     event_id = Column(Integer, ForeignKey("events.id"), unique=True, index=True)
     decision_id = Column(Integer, ForeignKey("decisions.id"))
-    status = Column(String(20), default="pending")  # pending, approved, rejected
+    status = Column(
+        String(20), default="pending"
+    )  # pending, approved, rejected, auto_approved
     approved_by = Column(String(100))  # Username or email
     rejected_reason = Column(Text, nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)

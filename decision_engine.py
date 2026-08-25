@@ -32,11 +32,14 @@ class DecisionResult:
 
 
 def load_config(config_path: str = "config.yaml"):
-    """Load configuration from YAML file."""
+    """Load configuration from YAML file and return the parsed settings."""
     global _config
-    with open(config_path, "r") as f:
+    with open(config_path, encoding="utf-8") as f:
         _config = yaml.safe_load(f)
+    if not isinstance(_config, dict) or "decision_engine" not in _config:
+        raise ValueError("Configuration must define a decision_engine mapping")
     logger.info(f"Decision engine config loaded from {config_path}")
+    return _config
 
 
 def decide(event: Event, enrichment: EnrichmentResult) -> DecisionResult:
@@ -125,7 +128,7 @@ def _calculate_risk_score(
     norm_abuse = abuse_score / 100.0
 
     # Normalize event severity (1-5 -> 0-1)
-    norm_severity = event.severity / 5.0
+    norm_severity = max(0.0, min(float(event.severity or 0), 5.0)) / 5.0
 
     # Normalize report count (capped at 200 for saturation)
     norm_reports = min(report_count / 200.0, 1.0)

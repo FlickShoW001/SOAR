@@ -64,6 +64,36 @@ def _canonical_utc_iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat()
 
 
+def _canonical_state_json(value: dict[str, Any] | None) -> str:
+    """Serialize state deterministically for database-independent hashing."""
+    if value is None:
+        return ""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _entry_hash_content(
+    timestamp: datetime,
+    event_id: int | None,
+    actor: str,
+    action: str,
+    before_state: dict[str, Any] | None,
+    after_state: dict[str, Any] | None,
+    reasoning: str,
+    prev_hash: str | None,
+) -> str:
+    """Build the current audit hash payload, including every mutable field."""
+    return (
+        f"{_canonical_utc_iso(timestamp)}|{event_id if event_id is not None else ''}|"
+        f"{actor}|{action}|{_canonical_state_json(before_state)}|"
+        f"{_canonical_state_json(after_state)}|{reasoning}|{prev_hash or ''}"
+    )
+
+
 def create_audit_entry(
     event_id: int | None,
     actor: str,
@@ -96,14 +126,20 @@ def create_audit_entry(
     prev_entry = session.query(AuditLog).order_by(AuditLog.id.desc()).first()
     prev_hash = prev_entry.entry_hash if prev_entry else None
 
-    # Serialize states for hashing
-    before_json = json.dumps(before_state) if before_state else ""
-    after_json = json.dumps(after_state) if after_state else ""
-
-    # Build this entry's hash from: timestamp + actor + action + states + reasoning + prev_hash
-    # (This is the "content" of the entry)
+    # Include all mutable audit fields in a deterministic hash payload. In
+    # particular, event_id must be covered so an entry cannot be reassigned to
+    # a different incident without invalidating the chain.
     now = datetime.now(timezone.utc)
-    hash_content = f"{_canonical_utc_iso(now)}|{actor}|{action}|{before_json}|{after_json}|{reasoning}|{prev_hash or ''}"
+    hash_content = _entry_hash_content(
+        now,
+        event_id,
+        actor,
+        action,
+        before_state,
+        after_state,
+        reasoning,
+        prev_hash,
+    )
     entry_hash = hashlib.sha256(hash_content.encode()).hexdigest()
 
     # Create audit entry
@@ -167,10 +203,12 @@ def verify_audit_chain(session, depth: int = 1000) -> bool:
         if anchor is not None:
             logger.error("Audit log was truncated but an anchor remains")
             return False
-        logger.info("Audit log is empty; verification passed")
+        logger.debug("Audit log is empty; verification passed")
         return True
 
-    actual_latest = session.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    # The descending, limited query above necessarily includes the chain head.
+    # Reuse it instead of issuing another query on every dashboard refresh.
+    actual_latest = entries[-1]
     if anchor is not None and (
         anchor.latest_entry_id != actual_latest.id
         or anchor.latest_entry_hash != actual_latest.entry_hash
@@ -201,24 +239,38 @@ def verify_audit_chain(session, depth: int = 1000) -> bool:
             )
             return False
 
-        # Recompute hash
+        # Recompute the current hash format first.
+        current_hash_content = _entry_hash_content(
+            entry.timestamp,
+            entry.event_id,
+            entry.actor,
+            entry.action,
+            entry.before_state,
+            entry.after_state,
+            entry.reasoning,
+            entry.prev_hash,
+        )
+        computed_hash = hashlib.sha256(current_hash_content.encode()).hexdigest()
+
+        # Preserve verification of entries created before event_id and
+        # canonical JSON were added to the hash payload.
         before_json = json.dumps(entry.before_state) if entry.before_state else ""
         after_json = json.dumps(entry.after_state) if entry.after_state else ""
-
-        legacy_hash_content = (
-            f"{entry.timestamp.isoformat()}|{entry.actor}|{entry.action}|"
-            f"{before_json}|{after_json}|{entry.reasoning}|{entry.prev_hash or ''}"
-        )
-        computed_hash = hashlib.sha256(legacy_hash_content.encode()).hexdigest()
-
-        # New entries use an explicit UTC offset. The legacy calculation keeps
-        # existing naive SQLite rows verifiable during the migration.
         if computed_hash != entry.entry_hash:
-            canonical_hash_content = (
+            legacy_hash_content = (
+                f"{entry.timestamp.isoformat()}|{entry.actor}|{entry.action}|"
+                f"{before_json}|{after_json}|{entry.reasoning}|{entry.prev_hash or ''}"
+            )
+            computed_hash = hashlib.sha256(legacy_hash_content.encode()).hexdigest()
+
+        if computed_hash != entry.entry_hash:
+            legacy_utc_hash_content = (
                 f"{_canonical_utc_iso(entry.timestamp)}|{entry.actor}|{entry.action}|"
                 f"{before_json}|{after_json}|{entry.reasoning}|{entry.prev_hash or ''}"
             )
-            computed_hash = hashlib.sha256(canonical_hash_content.encode()).hexdigest()
+            computed_hash = hashlib.sha256(
+                legacy_utc_hash_content.encode()
+            ).hexdigest()
 
         if computed_hash != entry.entry_hash:
             logger.error(
@@ -230,7 +282,7 @@ def verify_audit_chain(session, depth: int = 1000) -> bool:
         expected_prev_hash = entry.entry_hash
         expected_id = entry.id + 1
 
-    logger.info(f"Audit chain verification passed for {len(entries)} entries")
+    logger.debug("Audit chain verification passed for %s entries", len(entries))
     return True
 
 
@@ -278,7 +330,7 @@ def audit_enrichment(event, enrichment, session, actor="system"):
         event_id=event.id,
         actor=actor,
         action="enrich",
-        before_state={"status": event.status},
+        before_state={"status": "new"},
         after_state={
             "status": "enriched",
             "enrichment_id": enrichment.id,
@@ -297,7 +349,7 @@ def audit_decision(event, decision, session, actor="system"):
         event_id=event.id,
         actor=actor,
         action="decide",
-        before_state={"status": event.status},
+        before_state={"status": "enriched"},
         after_state={
             "status": "decided",
             "decision_id": decision.id,
@@ -315,7 +367,10 @@ def audit_approval(event, approval, session):
     """Helper: audit approval, auto-approval, or rejection."""
     if approval.status in ("approved", "auto_approved"):
         action = "approve"
-        status = "approved"
+        before_status = (
+            "decided" if approval.status == "auto_approved" else "pending_approval"
+        )
+        after_status = "approved" if approval.status == "auto_approved" else "responding"
         reasoning = (
             "Decision automatically approved"
             if approval.status == "auto_approved"
@@ -323,15 +378,16 @@ def audit_approval(event, approval, session):
         )
     else:
         action = "reject"
-        status = "rejected"
+        before_status = "pending_approval"
+        after_status = "rejected"
         reasoning = approval.rejected_reason or "Decision rejected"
 
     create_audit_entry(
         event_id=event.id,
         actor=approval.approved_by or "system",
         action=action,
-        before_state={"status": event.status, "approval_status": "pending"},
-        after_state={"status": status, "approval_status": approval.status},
+        before_state={"status": before_status, "approval_status": "pending"},
+        after_state={"status": after_status, "approval_status": approval.status},
         reasoning=reasoning,
         session=session,
     )
@@ -355,7 +411,7 @@ def audit_response(event, decision, response_result, session, actor="system"):
         event_id=event.id,
         actor=actor,
         action="respond",
-        before_state={"status": event.status},
+        before_state={"status": "responding"},
         after_state={
             "status": event.status,
             "response_status": response_status,
