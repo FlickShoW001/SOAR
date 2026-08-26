@@ -197,8 +197,8 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 class SecurityHeadersMiddleware:
     """Add browser security headers without buffering response bodies."""
 
-    def __init__(self, asgi_app):
-        self.app = asgi_app
+    def __init__(self, app):
+        self.app = app
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
