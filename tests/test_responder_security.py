@@ -5,7 +5,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from responder import _generate_block_commands, execute_response, init_lab_allowlist
+from responder import (
+    ConnectHandler,
+    _generate_block_commands,
+    execute_response,
+    init_lab_allowlist,
+)
 
 
 class ResponderSecurityTests(unittest.TestCase):
@@ -17,6 +22,11 @@ class ResponderSecurityTests(unittest.TestCase):
         event = SimpleNamespace(id=1, status="approved", source_ip="192.168.1.20")
         result = execute_response(event, self.decision)
         self.assertEqual(result["status"], "failed")
+
+    def test_missing_netmiko_does_not_break_module_import(self):
+        with patch("responder.importlib.import_module", side_effect=ImportError):
+            with self.assertRaisesRegex(RuntimeError, "requires.*netmiko"):
+                ConnectHandler(host="192.168.1.1")
 
     def test_non_lab_target_never_reaches_connector(self):
         event = SimpleNamespace(id=1, status="responding", source_ip="8.8.8.8")

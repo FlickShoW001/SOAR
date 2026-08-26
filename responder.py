@@ -5,15 +5,25 @@ Validates target against lab allow-list for safety.
 Implements dry-run/simulation mode for testing.
 """
 
+import importlib
 import ipaddress
 import logging
 import os
 
-from netmiko import ConnectHandler
-
 from models import Decision, Event
 
 logger = logging.getLogger(__name__)
+
+
+def ConnectHandler(**device):
+    """Load Netmiko only when a live device connection is requested."""
+    try:
+        netmiko = importlib.import_module("netmiko")
+    except ImportError as exc:
+        raise RuntimeError(
+            "Live response requires the optional 'netmiko' dependency"
+        ) from exc
+    return netmiko.ConnectHandler(**device)
 
 # Lab allow-list: IPs/subnets that are permitted to block targets
 _LAB_ALLOW_LIST: list[ipaddress.IPv4Network] = []

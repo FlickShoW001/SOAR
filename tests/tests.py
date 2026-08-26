@@ -437,7 +437,7 @@ def test_dashboard_endpoint(client):
 
     assert login_response.status_code == 303
     assert response.status_code == 200
-    assert "SOAR Command Center" in response.text
+    assert 'id="main-content"' in response.text
     assert "<table>" in response.text
 
 

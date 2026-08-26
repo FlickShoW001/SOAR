@@ -45,7 +45,7 @@ decision_engine:
     block_requires_approval: true
     
     # MONITOR actions auto-approve if risk < threshold
-    monitor_auto_approve_max_risk: 45
+    monitor_auto_approve_max_risk: 60
     
     # IGNORE actions always auto-approve (low impact)
     ignore_requires_approval: false

@@ -33,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, IPvAnyAddress, field_validator, model_validator
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 from starlette.datastructures import MutableHeaders
 
@@ -153,7 +154,8 @@ init_lab_allowlist()
 async def lifespan(_app: FastAPI):
     """Log application lifecycle events and release process-local state."""
     logger.info("SOAR Platform starting up...")
-    logger.info(f"Database: {DATABASE_URL}")
+    safe_database_url = make_url(DATABASE_URL).render_as_string(hide_password=True)
+    logger.info("Database: %s", safe_database_url)
     logger.info("Config loaded: config.yaml")
     logger.info("Lab allow-list initialized")
     if ADMIN_PASSWORD in {"admin", "change_this_password", "change_me"}:
