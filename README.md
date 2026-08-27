@@ -245,6 +245,7 @@ Important variables:
 | `AUDIT_EXTERNAL_ANCHOR_PATH` | None | Optional external chain-head file |
 | `AUDIT_ANCHOR_HMAC_KEY` | None | HMAC key used to authenticate the external anchor |
 | `SOAR_ALLOWED_HOSTS` | Local hosts | Host-header allow-list |
+| `SOAR_ALLOWED_ORIGINS` | None | Additional browser origins accepted behind a reverse proxy |
 | `SOAR_LOGIN_ATTEMPT_LIMIT` | `5` | Failed attempts allowed per IP/account window |
 | `SOAR_EVIDENCE_RETENTION_DAYS` | `0` | Days before terminal-event evidence is minimized; `0` disables cleanup |
 

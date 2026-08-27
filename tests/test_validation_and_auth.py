@@ -87,3 +87,10 @@ def test_decision_reasoning_parser_fails_closed():
     }
     assert main._parse_decision_reasoning("not-json") == {}
     assert main._parse_decision_reasoning("[]") == {}
+
+
+def test_login_csrf_tokens_are_signed_and_tamper_resistant():
+    token = main._create_login_csrf_token()
+
+    assert main._login_csrf_token_is_valid(token)
+    assert not main._login_csrf_token_is_valid(token + "tampered")

@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -118,6 +119,13 @@ LOGIN_ATTEMPT_LIMIT = _positive_env_int("SOAR_LOGIN_ATTEMPT_LIMIT", 5)
 LOGIN_ATTEMPT_WINDOW_SECONDS = _positive_env_int(
     "SOAR_LOGIN_ATTEMPT_WINDOW_SECONDS", 300
 )
+ALLOWED_HOSTS = [
+    host.strip().lower()
+    for host in os.getenv(
+        "SOAR_ALLOWED_HOSTS", "localhost,127.0.0.1,test,testserver"
+    ).split(",")
+    if host.strip()
+]
 _login_attempts: dict[str, deque[float]] = defaultdict(deque)
 _login_attempts_lock = threading.Lock()
 security_logger = logging.getLogger("soar.security")
@@ -357,13 +365,7 @@ class SecurityHeadersMiddleware:
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=[
-        host.strip()
-        for host in os.getenv(
-            "SOAR_ALLOWED_HOSTS", "localhost,127.0.0.1,test,testserver"
-        ).split(",")
-        if host.strip()
-    ],
+    allowed_hosts=ALLOWED_HOSTS,
 )
 app.mount(
     "/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static"
@@ -934,10 +936,79 @@ def _clear_login_failures(key: str) -> None:
 
 
 def _origin_is_allowed(request: Request) -> bool:
+    """Accept same-host browser posts and explicitly configured proxy origins."""
     origin = request.headers.get("origin")
     if not origin:
         return True
-    return origin.rstrip("/") == str(request.base_url).rstrip("/")
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+
+    normalized_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+    configured_origins = {
+        configured.rstrip("/").lower()
+        for configured in os.getenv("SOAR_ALLOWED_ORIGINS", "").split(",")
+        if configured.strip()
+    }
+    if normalized_origin in configured_origins:
+        return True
+
+    # TrustedHostMiddleware has already validated this header. Comparing the
+    # browser Origin to Host remains correct when TLS terminates at a proxy,
+    # where request.base_url may contain the internal scheme or address.
+    request_host = request.headers.get("host", "").lower()
+    if parsed.netloc.lower() == request_host:
+        return True
+
+    def trusted(hostname: str | None) -> bool:
+        if not hostname:
+            return False
+        hostname = hostname.lower()
+        return any(
+            allowed == "*"
+            or hostname == allowed
+            or (allowed.startswith("*.") and hostname.endswith(allowed[1:]))
+            for allowed in ALLOWED_HOSTS
+        )
+
+    try:
+        request_hostname = urlsplit(f"//{request_host}").hostname
+    except ValueError:
+        return False
+    return trusted(parsed.hostname) and trusted(request_hostname)
+
+
+def _create_login_csrf_token() -> str:
+    payload = json.dumps(
+        {"expires": int(time.time()) + 600, "nonce": secrets.token_urlsafe(16)},
+        separators=(",", ":"),
+    ).encode()
+    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    signature = hmac.new(
+        SESSION_SECRET.encode(), f"login-csrf:{encoded}".encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _login_csrf_token_is_valid(token: str | None) -> bool:
+    if not token or "." not in token:
+        return False
+    encoded, supplied_signature = token.rsplit(".", 1)
+    expected_signature = hmac.new(
+        SESSION_SECRET.encode(), f"login-csrf:{encoded}".encode(), hashlib.sha256
+    ).hexdigest()
+    if not secrets.compare_digest(supplied_signature, expected_signature):
+        return False
+    try:
+        payload = json.loads(
+            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        )
+        return int(payload["expires"]) >= int(time.time()) and bool(payload["nonce"])
+    except (ValueError, KeyError, TypeError, binascii.Error, json.JSONDecodeError):
+        return False
 
 
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
@@ -948,7 +1019,11 @@ def login_page(
     """Render the admin login page."""
     if current_user:
         return RedirectResponse(url="/", status_code=303)
-    return _template_response(request, "login.html", {"error": None})
+    return _template_response(
+        request,
+        "login.html",
+        {"error": None, "csrf_token": _create_login_csrf_token()},
+    )
 
 
 @app.post("/login", response_class=HTMLResponse, include_in_schema=False)
@@ -956,10 +1031,11 @@ def login(
     request: Request,
     username: str = Form(..., min_length=1, max_length=128),
     password: str = Form(..., min_length=1, max_length=256),
+    csrf_token: str | None = Form(default=None),
 ):
     """Validate admin credentials and start a signed browser session."""
-    if not _origin_is_allowed(request):
-        security_logger.warning("login_rejected reason=origin_mismatch")
+    if not _origin_is_allowed(request) and not _login_csrf_token_is_valid(csrf_token):
+        security_logger.warning("login_rejected reason=csrf_validation_failed")
         raise HTTPException(status_code=403, detail="Cross-origin request rejected")
     attempt_key = _login_attempt_key(request, username)
     if _login_is_rate_limited(attempt_key):
@@ -967,7 +1043,11 @@ def login(
         return _template_response(
             request,
             "login.html",
-            {"error": "Too many attempts. Try again later.", "username": username},
+            {
+                "error": "Too many attempts. Try again later.",
+                "username": username,
+                "csrf_token": _create_login_csrf_token(),
+            },
             status_code=429,
         )
     if not _credentials_are_valid(username, password):
@@ -979,6 +1059,7 @@ def login(
             {
                 "error": "Incorrect username or password.",
                 "username": username,
+                "csrf_token": _create_login_csrf_token(),
             },
             status_code=401,
         )

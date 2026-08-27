@@ -5,6 +5,7 @@ import asyncio
 import httpx
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from starlette.requests import Request
 
 import main
 from models import AuditLog, Base, Event
@@ -46,6 +47,31 @@ def test_invalid_login_preserves_username_without_password():
     assert response.status_code == 401
     assert 'value="operator-name"' in response.text
     assert "incorrect" not in response.text
+
+
+def test_login_origin_check_uses_the_browser_visible_host():
+    def allowed(origin, host="test"):
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/login",
+                "raw_path": b"/login",
+                "query_string": b"",
+                "headers": [
+                    (b"origin", origin.encode()),
+                    (b"host", host.encode()),
+                ],
+                "client": ("127.0.0.1", 12345),
+                "server": ("127.0.0.1", 8000),
+            }
+        )
+        return main._origin_is_allowed(request)
+
+    assert allowed("https://test")
+    assert allowed("http://localhost:8000", "127.0.0.1:8000")
+    assert not allowed("https://attacker.example")
 
 
 def test_dashboard_data_supports_authenticated_etag_revalidation():
