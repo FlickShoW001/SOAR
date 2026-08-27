@@ -115,6 +115,25 @@ class Approval(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now)
 
 
+class ResponseJob(Base):
+    """Durable, idempotent intent and result record for device responses."""
+
+    __tablename__ = "response_jobs"
+
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, ForeignKey("events.id"), unique=True, index=True)
+    decision_id = Column(Integer, ForeignKey("decisions.id"), nullable=False)
+    idempotency_key = Column(String(128), unique=True, nullable=False, index=True)
+    status = Column(String(20), default="pending", nullable=False, index=True)
+    attempt_count = Column(Integer, default=0, nullable=False)
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    result = Column(JSON, nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class AuditLog(Base):
     """
     Tamper-evident audit trail of all platform actions.

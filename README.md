@@ -76,6 +76,8 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
+For reproducible deployments, install with `pip install --require-hashes -r requirements.lock`. Runtime and development tooling are split between `requirements.txt` and `requirements-dev.txt`; CI audits the lockfile and publishes a CycloneDX SBOM.
+
 Set secure local credentials and an unpredictable session secret in `.env`:
 
 ```dotenv
@@ -115,7 +117,7 @@ The browser uses a signed, HTTP-only, `SameSite=Strict` session cookie. API clie
 Additional users can be configured with JSON:
 
 ```dotenv
-SOAR_USERS_JSON={"operator":{"password":"replace-me","role":"operator"},"analyst":{"password":"replace-me","role":"viewer"}}
+SOAR_USERS_JSON={"operator":{"password_hash":"scrypt$...","role":"operator"},"analyst":{"password_hash":"scrypt$...","role":"viewer"}}
 ```
 
 Malformed user records are ignored, and malformed top-level JSON fails closed to the built-in administrator only. Restart the application after changing account configuration.
@@ -233,6 +235,7 @@ Important variables:
 | `ABUSEIPDB_CACHE_TTL_MINUTES` | `60` | Positive process-local cache TTL |
 | `SOAR_ADMIN_USERNAME` | `admin` | Built-in administrator name |
 | `SOAR_ADMIN_PASSWORD` | `admin` | Built-in administrator password |
+| `SOAR_ADMIN_PASSWORD_HASH` | None | Preferred scrypt verifier; generate with `scripts/hash_password.py` |
 | `SOAR_USERS_JSON` | None | Additional role-based accounts |
 | `SOAR_SESSION_SECRET` | Random per process | Session HMAC key |
 | `SOAR_SESSION_TTL_SECONDS` | `28800` | Browser session lifetime |
@@ -240,6 +243,10 @@ Important variables:
 | `LAB_DEVICE_*` | See `.env.example` | Netmiko device configuration |
 | `LAB_ALLOWED_IPS` | Private lab CIDRs | Permitted targets and device networks |
 | `AUDIT_EXTERNAL_ANCHOR_PATH` | None | Optional external chain-head file |
+| `AUDIT_ANCHOR_HMAC_KEY` | None | HMAC key used to authenticate the external anchor |
+| `SOAR_ALLOWED_HOSTS` | Local hosts | Host-header allow-list |
+| `SOAR_LOGIN_ATTEMPT_LIMIT` | `5` | Failed attempts allowed per IP/account window |
+| `SOAR_EVIDENCE_RETENTION_DAYS` | `0` | Days before terminal-event evidence is minimized; `0` disables cleanup |
 
 Relative SQLite paths are resolved against the project directory rather than the launch directory.
 

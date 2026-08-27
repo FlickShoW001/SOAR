@@ -27,6 +27,7 @@ SOAR_SESSION_COOKIE_SECURE=true
 Generate the session secret with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
 
 For additional accounts, use `SOAR_USERS_JSON`. Use only the roles `admin`, `operator`, and `viewer`.
+Store generated `password_hash` values instead of plaintext passwords. Generate a verifier with `python scripts/hash_password.py`, then set `SOAR_ADMIN_PASSWORD_HASH` and hashed user records. Configure `SOAR_ALLOWED_HOSTS`, login throttling, an evidence-retention period, and `AUDIT_ANCHOR_HMAC_KEY` for the external anchor.
 
 ## 3. Keep responses in simulation
 

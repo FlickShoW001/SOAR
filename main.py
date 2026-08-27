@@ -12,10 +12,13 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
+import uuid
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -36,6 +39,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 from starlette.datastructures import MutableHeaders
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from audit_log import (
     audit_approval,
@@ -51,7 +55,15 @@ from decision_engine import load_config as load_decision_config
 from decision_engine import persist_decision
 from enrichment import clear_cache as clear_enrichment_cache
 from enrichment import enrich_ip
-from models import Approval, AuditLog, Decision, EnrichmentResult, Event, init_db
+from models import (
+    Approval,
+    AuditLog,
+    Decision,
+    EnrichmentResult,
+    Event,
+    ResponseJob,
+    init_db,
+)
 from responder import execute_response, init_lab_allowlist
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -102,6 +114,13 @@ SESSION_COOKIE_SECURE = (
 )
 dashboard_basic_security = HTTPBasic(realm="SOAR Dashboard", auto_error=False)
 dashboard_cookie_security = APIKeyCookie(name=SESSION_COOKIE_NAME, auto_error=False)
+LOGIN_ATTEMPT_LIMIT = _positive_env_int("SOAR_LOGIN_ATTEMPT_LIMIT", 5)
+LOGIN_ATTEMPT_WINDOW_SECONDS = _positive_env_int(
+    "SOAR_LOGIN_ATTEMPT_WINDOW_SECONDS", 300
+)
+_login_attempts: dict[str, deque[float]] = defaultdict(deque)
+_login_attempts_lock = threading.Lock()
+security_logger = logging.getLogger("soar.security")
 
 
 @dataclass(frozen=True)
@@ -110,8 +129,36 @@ class UserIdentity:
     role: str
 
 
+def _hash_password(password: str, salt: bytes | None = None) -> str:
+    """Derive a memory-hard scrypt password verifier for local accounts."""
+    salt = salt or secrets.token_bytes(16)
+    derived = hashlib.scrypt(
+        password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32
+    )
+    return f"scrypt$16384$8$1${salt.hex()}${derived.hex()}"
+
+
+def _verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, n, r, p, salt_hex, expected_hex = encoded.split("$", 5)
+        if algorithm != "scrypt":
+            return False
+        actual = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=bytes.fromhex(salt_hex),
+            n=int(n),
+            r=int(r),
+            p=int(p),
+            dklen=len(bytes.fromhex(expected_hex)),
+        )
+        return secrets.compare_digest(actual.hex(), expected_hex)
+    except (TypeError, ValueError):
+        return False
+
+
 def _load_users() -> dict[str, dict[str, str]]:
-    users = {ADMIN_USERNAME: {"password": ADMIN_PASSWORD, "role": "admin"}}
+    admin_hash = os.getenv("SOAR_ADMIN_PASSWORD_HASH") or _hash_password(ADMIN_PASSWORD)
+    users = {ADMIN_USERNAME: {"password_hash": admin_hash, "role": "admin"}}
     raw_users = os.getenv("SOAR_USERS_JSON")
     if not raw_users:
         return users
@@ -124,9 +171,13 @@ def _load_users() -> dict[str, dict[str, str]]:
                 logger.warning("Ignoring malformed SOAR user record for %s", username)
                 continue
             role = record.get("role")
+            password_hash = record.get("password_hash")
             password = record.get("password")
-            if username and password and role in VALID_ROLES:
-                users[str(username)] = {"password": str(password), "role": role}
+            if username and (password_hash or password) and role in VALID_ROLES:
+                users[str(username)] = {
+                    "password_hash": str(password_hash) if password_hash else _hash_password(str(password)),
+                    "role": role,
+                }
     except (TypeError, ValueError, json.JSONDecodeError):
         logger.error("SOAR_USERS_JSON is invalid; only the admin account is available")
     return users
@@ -150,6 +201,55 @@ RESPONDER_SIMULATION_MODE = (
 init_lab_allowlist()
 
 
+def _apply_retention_policy() -> None:
+    """Minimize aged evidence while preserving lifecycle and audit metadata."""
+    retention_days = int(os.getenv("SOAR_EVIDENCE_RETENTION_DAYS", "0") or "0")
+    if retention_days <= 0:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    db = SessionLocal()
+    try:
+        terminal = {"responded", "closed", "rejected", "response_failed", "processing_failed"}
+        event_ids = [
+            row[0]
+            for row in db.query(Event.id)
+            .filter(Event.status.in_(terminal), Event.updated_at < cutoff)
+            .all()
+        ]
+        if not event_ids:
+            return
+        events = db.query(Event).filter(Event.id.in_(event_ids)).all()
+        for event in events:
+            event.raw_log_line = "[evidence removed by retention policy]"
+        for enrichment in db.query(EnrichmentResult).filter(
+            EnrichmentResult.event_id.in_(event_ids)
+        ):
+            enrichment.raw_response = None
+        for decision in db.query(Decision).filter(Decision.event_id.in_(event_ids)):
+            decision.reasoning = '{"retention":"detailed reasoning removed"}'
+        for job in db.query(ResponseJob).filter(ResponseJob.event_id.in_(event_ids)):
+            if job.result:
+                job.result = {
+                    "success": bool(job.result.get("success")),
+                    "retention": "device output removed",
+                }
+        db.commit()
+        create_audit_entry(
+            event_id=None,
+            actor="system",
+            action="retention",
+            before_state={"eligible_events": len(event_ids)},
+            after_state={"minimized_events": len(event_ids)},
+            reasoning=f"Applied {retention_days}-day evidence retention policy",
+            session=db,
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Evidence retention failed")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Log application lifecycle events and release process-local state."""
@@ -158,6 +258,7 @@ async def lifespan(_app: FastAPI):
     logger.info("Database: %s", safe_database_url)
     logger.info("Config loaded: config.yaml")
     logger.info("Lab allow-list initialized")
+    _apply_retention_policy()
     if ADMIN_PASSWORD in {"admin", "change_this_password", "change_me"}:
         logger.warning(
             "Dashboard is using an example administrator password; "
@@ -205,8 +306,20 @@ class SecurityHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
+        request_id = next(
+            (
+                value.decode("latin-1")
+                for name, value in scope.get("headers", [])
+                if name == b"x-request-id" and 0 < len(value) <= 128
+            ),
+            str(uuid.uuid4()),
+        )
+        response_status = 500
+
         async def send_with_headers(message):
+            nonlocal response_status
             if message["type"] == "http.response.start":
+                response_status = message["status"]
                 headers = MutableHeaders(scope=message)
                 headers.setdefault("X-Content-Type-Options", "nosniff")
                 headers.setdefault("X-Frame-Options", "DENY")
@@ -215,14 +328,43 @@ class SecurityHeadersMiddleware:
                     "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
                 )
                 headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+                headers.setdefault(
+                    "Content-Security-Policy",
+                    "default-src 'self'; script-src 'self'; style-src 'self'; "
+                    "img-src 'self' data:; object-src 'none'; base-uri 'self'; "
+                    "form-action 'self'; frame-ancestors 'none'",
+                )
+                headers.setdefault("X-Request-ID", request_id)
+                if scope.get("scheme") == "https":
+                    headers.setdefault(
+                        "Strict-Transport-Security",
+                        "max-age=31536000; includeSubDomains",
+                    )
                 if scope.get("path") in {"/", "/login"}:
                     headers.setdefault("Cache-Control", "no-store")
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
+        logger.info(
+            "request_complete request_id=%s method=%s path=%s status=%s",
+            request_id,
+            scope.get("method"),
+            scope.get("path"),
+            response_status,
+        )
 
 
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=[
+        host.strip()
+        for host in os.getenv(
+            "SOAR_ALLOWED_HOSTS", "localhost,127.0.0.1,test,testserver"
+        ).split(",")
+        if host.strip()
+    ],
+)
 app.mount(
     "/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static"
 )
@@ -268,17 +410,14 @@ def get_db():
 
 
 def _credentials_are_valid(username: str, password: str) -> bool:
-    """Compare credentials in constant time."""
+    """Verify credentials against memory-hard password hashes."""
     record = AUTH_USERS.get(username)
-    expected_password = record["password"] if record else secrets.token_hex(16)
+    expected_hash = record["password_hash"] if record else _hash_password(secrets.token_hex(16))
     username_matches = secrets.compare_digest(
         username.encode("utf-8"),
         (username if record else ADMIN_USERNAME).encode("utf-8"),
     )
-    password_matches = secrets.compare_digest(
-        password.encode("utf-8"),
-        expected_password.encode("utf-8"),
-    )
+    password_matches = _verify_password(password, expected_hash)
     return username_matches and password_matches
 
 
@@ -486,6 +625,51 @@ def apply_response_result(event: Event, response_result: dict) -> tuple[str, str
     return event.status, message
 
 
+def _execute_durable_response(
+    event: Event, decision: Decision, db: Session
+) -> dict:
+    """Persist response intent before I/O and a reusable result afterward."""
+    idempotency_key = f"event:{event.id}:decision:{decision.id}:response"
+    job = db.query(ResponseJob).filter_by(idempotency_key=idempotency_key).first()
+    if job and job.status == "completed" and job.result is not None:
+        return dict(job.result)
+    max_attempts = _positive_env_int("SOAR_RESPONSE_MAX_ATTEMPTS", 3)
+    if job and job.attempt_count >= max_attempts:
+        raise RuntimeError("Response retry limit reached")
+    if job is None:
+        job = ResponseJob(
+            event_id=event.id,
+            decision_id=decision.id,
+            idempotency_key=idempotency_key,
+            status="pending",
+        )
+        db.add(job)
+        db.commit()
+
+    job.status = "running"
+    job.claimed_at = datetime.now(timezone.utc)
+    job.attempt_count += 1
+    db.commit()
+    try:
+        result = execute_response(
+            event,
+            decision,
+            dry_run=RESPONDER_DRY_RUN,
+            simulation_mode=RESPONDER_SIMULATION_MODE,
+        )
+        job.status = "completed"
+        job.completed_at = datetime.now(timezone.utc)
+        job.result = result
+        job.last_error = None
+        db.commit()
+        return result
+    except Exception as exc:
+        job.status = "failed"
+        job.last_error = type(exc).__name__
+        db.commit()
+        raise
+
+
 # ============================================================================
 # Core Pipeline Endpoints
 # ============================================================================
@@ -587,12 +771,7 @@ def post_detection(
             # Execute response
             event.status = "responding"
             db.commit()
-            resp_result = execute_response(
-                event,
-                decision,
-                dry_run=RESPONDER_DRY_RUN,
-                simulation_mode=RESPONDER_SIMULATION_MODE,
-            )
+            resp_result = _execute_durable_response(event, decision, db)
             event_status, response_message = apply_response_result(event, resp_result)
             db.commit()
             audit_response(
@@ -690,12 +869,7 @@ def approve_decision(
             audit_approval(event, approval, db)
 
             # Execute response
-            resp_result = execute_response(
-                event,
-                decision,
-                dry_run=RESPONDER_DRY_RUN,
-                simulation_mode=RESPONDER_SIMULATION_MODE,
-            )
+            resp_result = _execute_durable_response(event, decision, db)
             event_status, response_message = apply_response_result(event, resp_result)
             db.commit()
             audit_response(
@@ -735,6 +909,37 @@ def approve_decision(
 # ============================================================================
 # Dashboard Endpoints
 # ============================================================================
+def _login_attempt_key(request: Request, username: str) -> str:
+    client_ip = request.client.host if request.client else "unknown"
+    return f"{client_ip}:{username.casefold()}"
+
+
+def _login_is_rate_limited(key: str) -> bool:
+    now = time.monotonic()
+    with _login_attempts_lock:
+        attempts = _login_attempts[key]
+        while attempts and now - attempts[0] > LOGIN_ATTEMPT_WINDOW_SECONDS:
+            attempts.popleft()
+        return len(attempts) >= LOGIN_ATTEMPT_LIMIT
+
+
+def _record_login_failure(key: str) -> None:
+    with _login_attempts_lock:
+        _login_attempts[key].append(time.monotonic())
+
+
+def _clear_login_failures(key: str) -> None:
+    with _login_attempts_lock:
+        _login_attempts.pop(key, None)
+
+
+def _origin_is_allowed(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    return origin.rstrip("/") == str(request.base_url).rstrip("/")
+
+
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
 def login_page(
     request: Request,
@@ -753,7 +958,21 @@ def login(
     password: str = Form(..., min_length=1, max_length=256),
 ):
     """Validate admin credentials and start a signed browser session."""
+    if not _origin_is_allowed(request):
+        security_logger.warning("login_rejected reason=origin_mismatch")
+        raise HTTPException(status_code=403, detail="Cross-origin request rejected")
+    attempt_key = _login_attempt_key(request, username)
+    if _login_is_rate_limited(attempt_key):
+        security_logger.warning("login_rate_limited account=%s", username)
+        return _template_response(
+            request,
+            "login.html",
+            {"error": "Too many attempts. Try again later.", "username": username},
+            status_code=429,
+        )
     if not _credentials_are_valid(username, password):
+        _record_login_failure(attempt_key)
+        security_logger.warning("login_failed account=%s", username)
         return _template_response(
             request,
             "login.html",
@@ -764,6 +983,8 @@ def login(
             status_code=401,
         )
 
+    _clear_login_failures(attempt_key)
+    security_logger.info("login_succeeded account=%s", username)
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
@@ -775,6 +996,34 @@ def login(
         path="/",
     )
     return response
+
+
+@app.post("/response-jobs/{event_id}/retry")
+def retry_response_job(
+    event_id: int,
+    current_user: UserIdentity = Depends(require_operator),
+    db: Session = Depends(get_db),
+):
+    """Retry a persisted failed/interrupted response with the same idempotency key."""
+    event = db.get(Event, event_id)
+    decision = db.query(Decision).filter_by(event_id=event_id).first()
+    job = db.query(ResponseJob).filter_by(event_id=event_id).first()
+    if not event or not decision or not job:
+        raise HTTPException(status_code=404, detail="Response job not found")
+    if job.status not in {"failed", "running", "pending"}:
+        raise HTTPException(status_code=409, detail="Response job is not retryable")
+    event.status = "responding"
+    db.commit()
+    try:
+        result = _execute_durable_response(event, decision, db)
+    except Exception as exc:
+        event.status = "response_failed"
+        db.commit()
+        raise HTTPException(status_code=409, detail="Response retry failed") from exc
+    status, message = apply_response_result(event, result)
+    db.commit()
+    audit_response(event, decision, result, db, actor=current_user.username)
+    return {"id": event.id, "status": status, "message": message, "response": result}
 
 
 @app.post("/logout", include_in_schema=False)

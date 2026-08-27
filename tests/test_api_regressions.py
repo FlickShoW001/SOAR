@@ -28,6 +28,8 @@ def test_login_page_has_security_headers_and_is_not_cached():
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["cache-control"] == "no-store"
+    assert "default-src 'self'" in response.headers["content-security-policy"]
+    assert response.headers["x-request-id"]
 
 
 def test_invalid_login_preserves_username_without_password():

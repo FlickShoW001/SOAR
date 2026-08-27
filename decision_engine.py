@@ -38,6 +38,30 @@ def load_config(config_path: str = "config.yaml"):
         _config = yaml.safe_load(f)
     if not isinstance(_config, dict) or "decision_engine" not in _config:
         raise ValueError("Configuration must define a decision_engine mapping")
+    allowed_sections = {"enrichment", "decision_engine", "event_severity", "responder"}
+    unknown = set(_config) - allowed_sections
+    if unknown:
+        raise ValueError(f"Unknown configuration sections: {sorted(unknown)}")
+    engine_config = _config["decision_engine"]
+    weights = engine_config.get("risk_score_weights", {})
+    required_weights = {"abuse_score", "event_severity", "report_count"}
+    if set(weights) != required_weights or any(
+        not isinstance(value, (int, float)) or value < 0 or value > 1
+        for value in weights.values()
+    ):
+        raise ValueError("Risk weights must define three values between 0 and 1")
+    if abs(sum(weights.values()) - 1.0) > 1e-9:
+        raise ValueError("Risk weights must sum to 1.0")
+    thresholds = engine_config.get("action_thresholds", {})
+    ordered = [
+        thresholds.get("ignore_min_risk"),
+        thresholds.get("monitor_min_risk"),
+        thresholds.get("block_min_risk"),
+    ]
+    if any(not isinstance(value, (int, float)) for value in ordered) or not (
+        0 <= ordered[0] <= ordered[1] <= ordered[2] <= 100
+    ):
+        raise ValueError("Action thresholds must be ordered within 0..100")
     logger.info(f"Decision engine config loaded from {config_path}")
     return _config
 

@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from typing import Any
 from models import AuditAnchor, AuditLog
 
 logger = logging.getLogger(__name__)
+_audit_append_lock = threading.RLock()
 
 
 def _export_external_anchor(audit: AuditLog) -> None:
@@ -23,14 +25,19 @@ def _export_external_anchor(audit: AuditLog) -> None:
     if not anchor_path:
         return
     try:
+        payload = {
+            "entry_id": audit.id,
+            "entry_hash": audit.entry_hash,
+            "timestamp": _canonical_utc_iso(audit.timestamp),
+        }
+        signing_key = os.getenv("AUDIT_ANCHOR_HMAC_KEY")
+        if signing_key:
+            canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            payload["signature"] = hmac.new(
+                signing_key.encode(), canonical.encode(), hashlib.sha256
+            ).hexdigest()
         Path(anchor_path).write_text(
-            json.dumps(
-                {
-                    "entry_id": audit.id,
-                    "entry_hash": audit.entry_hash,
-                    "timestamp": _canonical_utc_iso(audit.timestamp),
-                }
-            )
+            json.dumps(payload)
             + "\n",
             encoding="utf-8",
         )
@@ -44,6 +51,15 @@ def _external_anchor_matches(audit: AuditLog) -> bool:
         return True
     try:
         anchored = json.loads(Path(anchor_path).read_text(encoding="utf-8"))
+        signing_key = os.getenv("AUDIT_ANCHOR_HMAC_KEY")
+        if signing_key:
+            supplied = anchored.pop("signature", "")
+            canonical = json.dumps(anchored, separators=(",", ":"), sort_keys=True)
+            expected = hmac.new(
+                signing_key.encode(), canonical.encode(), hashlib.sha256
+            ).hexdigest()
+            if not secrets_compare(supplied, expected):
+                return False
         return int(anchored["entry_id"]) == audit.id and secrets_compare(
             anchored["entry_hash"], audit.entry_hash
         )
@@ -95,6 +111,22 @@ def _entry_hash_content(
 
 
 def create_audit_entry(
+    event_id: int | None,
+    actor: str,
+    action: str,
+    before_state: dict[str, Any] | None,
+    after_state: dict[str, Any] | None,
+    reasoning: str,
+    session,
+) -> AuditLog:
+    """Serialize audit appends within this single-process deployment."""
+    with _audit_append_lock:
+        return _create_audit_entry_locked(
+            event_id, actor, action, before_state, after_state, reasoning, session
+        )
+
+
+def _create_audit_entry_locked(
     event_id: int | None,
     actor: str,
     action: str,

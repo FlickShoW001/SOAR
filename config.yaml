@@ -65,25 +65,8 @@ event_severity:
   low: 2
   info: 1
 
-# Log file source configuration
-# Supports tailing local log files as an alternative to POST endpoint
-log_sources:
-  enabled: true
-  paths:
-    - /var/log/auth.log
-    - /var/log/secure
-  poll_interval_seconds: 5
-
 # Dry-run / Simulation mode
 # When enabled, responder will NOT actually connect to device
 responder:
   dry_run: true              # CRITICAL: Set to false ONLY after lab testing
   simulation_mode: true      # Log what would be sent without connecting
-  
-# Audit trail configuration
-audit_log:
-  # Enable tamper-evidence via hash-chaining
-  enable_hash_chain: true
-  
-  # How many previous audit entries to keep (for verification performance)
-  verification_depth: 1000

@@ -52,9 +52,10 @@ def test_malformed_users_json_fails_closed(monkeypatch):
     monkeypatch.setenv("SOAR_USERS_JSON", '[{"username":"unexpected-list"}]')
     users = main._load_users()
 
-    assert users == {
-        main.ADMIN_USERNAME: {"password": main.ADMIN_PASSWORD, "role": "admin"}
-    }
+    assert set(users) == {main.ADMIN_USERNAME}
+    assert users[main.ADMIN_USERNAME]["role"] == "admin"
+    assert users[main.ADMIN_USERNAME]["password_hash"].startswith("scrypt$")
+    assert "password" not in users[main.ADMIN_USERNAME]
 
 
 def test_malformed_user_record_is_ignored(monkeypatch):
@@ -66,6 +67,7 @@ def test_malformed_user_record_is_ignored(monkeypatch):
 
     assert "broken" not in users
     assert users["reader"]["role"] == "viewer"
+    assert main._verify_password("pw", users["reader"]["password_hash"])
 
 
 def test_signed_malformed_session_payload_is_rejected():

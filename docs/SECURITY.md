@@ -76,7 +76,7 @@ Before a shared deployment:
 3. Restrict ingress to operator networks or a trusted VPN.
 4. Use a secret manager for AbuseIPDB and device credentials.
 5. Disable or protect interactive API documentation if not required.
-6. Put authentication rate limiting at the reverse proxy or identity provider.
+6. Keep application login throttling enabled and add proxy or identity-provider limits as a second layer.
 7. Centralize logs without recording secrets or full device output unnecessarily.
 8. Protect and back up the database and external anchor separately.
 9. Run the service with a dedicated, least-privileged operating-system account.
@@ -104,14 +104,13 @@ For stronger assurance:
 
 ## Current security limitations
 
-- Credentials are configured as environment strings rather than password hashes in a user database.
-- There is no MFA, SSO, account lockout, or application-level login rate limiter.
+- Local accounts support scrypt password verifiers and bounded per-IP/account login throttling. Shared deployments should still use named federated identity with MFA.
 - CSRF protection relies primarily on strict same-site cookies; there are no synchronizer tokens.
 - API documentation is public by default.
 - Enrichment and response run synchronously and can consume request capacity.
 - SQLite and process-local state constrain safe concurrency and scaling.
 - Audit-chain creation is designed for the single-process deployment model.
-- Raw evidence can contain sensitive log content and requires appropriate retention controls.
+- Raw evidence can contain sensitive log content. `SOAR_EVIDENCE_RETENTION_DAYS` minimizes aged terminal-event evidence and records the cleanup in the audit chain.
 
 ## Responsible operation
 
